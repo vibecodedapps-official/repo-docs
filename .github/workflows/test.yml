@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # AGENTS.md promises Python 3.9+, so test the floor and a current release.
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The staleness check reads commit history; a shallow clone has none.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Check this repository with its own checker
+        run: python skills/repo-docs/scripts/repo_docs_check.py .

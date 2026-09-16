@@ -59,12 +59,17 @@ Source: https://code.claude.com/docs/en/memory
 
 ### Claude Code
 
-repo-docs is not yet published to a hosted plugin marketplace, so install it
-from a local clone. This repository acts as its own marketplace: it carries
-a `.claude-plugin/marketplace.json` alongside `plugin.json`, so a local
-install can be persistent instead of something you have to remember to
-re-invoke every session. Clone this repository, then inside a Claude Code
-session run:
+This repository acts as its own plugin marketplace: it carries a
+`.claude-plugin/marketplace.json` alongside `plugin.json`, so the install is
+persistent instead of something you have to remember to re-invoke every
+session. Inside a Claude Code session, run:
+
+```
+/plugin marketplace add vibecodedapps-official/repo-docs
+/plugin install repo-docs@repo-docs
+```
+
+To install from a clone instead, point the first command at the directory:
 
 ```
 /plugin marketplace add /path/to/repo-docs
@@ -177,10 +182,7 @@ go away.
 ## GitHub Actions
 
 This snippet is for repos that want the mechanical checks enforced on pull
-requests without installing the plugin. repo-docs is not yet published to a
-package registry or a stable hosted URL, so it fetches the checker script
-directly from wherever you host your own copy of this repository. Replace
-`<owner>/repo-docs` with that location before using it.
+requests without installing the plugin.
 
 ```yaml
 name: repo-docs
@@ -194,9 +196,15 @@ jobs:
           fetch-depth: 0
       - run: |
           curl -fsSL -o repo_docs_check.py \
-            https://raw.githubusercontent.com/<owner>/repo-docs/main/skills/repo-docs/scripts/repo_docs_check.py
+            https://raw.githubusercontent.com/vibecodedapps-official/repo-docs/main/skills/repo-docs/scripts/repo_docs_check.py
           python3 repo_docs_check.py .
 ```
+
+The checker is one file with no dependencies beyond the standard library, so
+you can also copy `skills/repo-docs/scripts/repo_docs_check.py` into your own
+repository and run it directly. Vendoring it pins the version you reviewed and
+removes the network call, which matters if your runners have no outbound
+access.
 
 The `fetch-depth: 0` setting is there because the staleness check reads
 commit history, and the default shallow clone has none to read.

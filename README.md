@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/repo-docs-logo.png" alt="repo-docs — a document branching into three nodes" width="600">
+</p>
+
 # repo-docs
 
 repo-docs is a portable agent skill that keeps a repository's instruction

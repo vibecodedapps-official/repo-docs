@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/repo-docs/scripts/repo_docs_check.py\" \"${CLAUDE_PROJECT_DIR}\" --hook"
+          }
+        ]
+      }
+    ]
+  }
+}

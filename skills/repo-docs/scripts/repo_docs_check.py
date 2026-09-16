@@ -15,17 +15,19 @@ Standard library only. Never writes or edits a file.
 import argparse
 import json
 import os
+import posixpath
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"}
+CLAUDE_MD_BYTE_THRESHOLD = 300
 LINK_EXTS = (".md", ".markdown", ".txt", ".json", ".yml", ".yaml", ".toml", ".py", ".sh", ".js", ".ts")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
-SEVERITY_RANK = {"error": 0, "warning": 1, "info": 2}
+SEVERITIES = ("error", "warning", "info")
+SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
 def safe_read_text(path):
     """UTF-8 text, bad bytes replaced, or None if the file can't be read at
@@ -46,11 +48,8 @@ def safe_stat_size(path):
 def posix_rel(root, path):
     return os.path.relpath(str(path), str(root)).replace(os.sep, "/")
 
-def posix_dir(rel_path):
-    return rel_path.rsplit("/", 1)[0] if "/" in rel_path else ""
-
-def posix_join(dir_, name):
-    return name if dir_ == "" else f"{dir_}/{name}"
+def first_nonblank_line(text):
+    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
 
 def finding(check, severity, path, message, fix=""):
     return {"check": check, "severity": severity, "path": path, "message": message, "fix": fix}
@@ -109,15 +108,13 @@ def bridge_status(root, a_dir, a_rel):
     Resolves the CLAUDE.md sibling against the filesystem, not against the
     gitignore-filtered scan list: a gitignored CLAUDE.md still exists and
     Claude Code still loads it, so it must not be reported as missing."""
-    c_rel = posix_join(a_dir, "CLAUDE.md")
+    c_rel = posixpath.join(a_dir, "CLAUDE.md")
     c_path, a_path = root / c_rel, root / a_rel
+    fix = f"printf '@AGENTS.md\\n' > {c_rel}"
 
     if not exists_on_disk(c_path):
-        fix = f"printf '@AGENTS.md\\n' > {c_rel}"
         msg = f"{a_rel} has no CLAUDE.md bridge; Claude Code will not load it"
         return "missing", finding("bridge", "error", a_rel, msg, fix)
-
-    fix = f"printf '@AGENTS.md\\n' > {c_rel}"
 
     if c_path.is_symlink():
         if c_path.resolve() == a_path.resolve():
@@ -130,7 +127,7 @@ def bridge_status(root, a_dir, a_rel):
         if text is None:
             msg = f"{c_rel} could not be read (permission error); Claude Code will not load {a_rel}"
             return "invalid", finding("bridge", "error", c_rel, msg, fix)
-        first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        first_line = first_nonblank_line(text)
         if first_line == "@AGENTS.md":
             return "import", None
         msg = f"{c_rel} first line is not exactly '@AGENTS.md' (mentioning it in prose does not count); Claude Code will not load {a_rel}"
@@ -162,7 +159,7 @@ def dangling_import(c_path, is_symlink):
             return True, 0
         return False, safe_stat_size(target) or 0
     text = safe_read_text(c_path)
-    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "") if text is not None else ""
+    first_line = first_nonblank_line(text) if text is not None else ""
     if first_line == "@AGENTS.md":
         return True, 0
     return False, safe_stat_size(c_path) or 0
@@ -172,7 +169,7 @@ def analyze_docs(root, agents_rel, claude_rel):
     findings, files = [], []
 
     for a_rel in sorted(agents_rel):
-        a_dir = posix_dir(a_rel)
+        a_dir = posixpath.dirname(a_rel)
         bridge, bridge_finding = bridge_status(root, a_dir, a_rel)
         if bridge_finding:
             findings.append(bridge_finding)
@@ -191,28 +188,28 @@ def analyze_docs(root, agents_rel, claude_rel):
         files.append({"path": a_rel, "bytes": a_bytes, "status": status, "bridge": bridge})
 
     for c_rel in sorted(claude_rel):
-        c_dir = posix_dir(c_rel)
+        c_dir = posixpath.dirname(c_rel)
         c_path = root / c_rel
         is_symlink = c_path.is_symlink()
         # Resolved against the filesystem, like bridge_status: a gitignored
         # sibling AGENTS.md still exists and still bridges normally.
-        has_sibling = exists_on_disk(root / posix_join(c_dir, "AGENTS.md"))
+        has_sibling = exists_on_disk(root / posixpath.join(c_dir, "AGENTS.md"))
         status = "ok"
 
         if has_sibling:
             c_bytes = 0 if is_symlink else (safe_stat_size(c_path) or 0)
-            if not is_symlink and c_bytes > 300:
+            if not is_symlink and c_bytes > CLAUDE_MD_BYTE_THRESHOLD:
                 msg = f"{c_rel} bridge file is {c_bytes} bytes; keep CLAUDE.md additions minimal and put substance in AGENTS.md"
                 findings.append(finding("size", "info", c_rel, msg))
                 status = "info"
         else:
             is_dangling, c_bytes = dangling_import(c_path, is_symlink)
             if is_dangling:
-                expected = posix_join(c_dir, "AGENTS.md")
+                expected = posixpath.join(c_dir, "AGENTS.md")
                 msg = f"{c_rel} imports AGENTS.md, but {expected} does not exist; Claude Code will load a broken import"
                 fix = f"create {expected}, or remove the @AGENTS.md import from {c_rel}"
                 findings.append(finding("bridge", "error", c_rel, msg, fix))
-            elif c_bytes > 300:
+            elif c_bytes > CLAUDE_MD_BYTE_THRESHOLD:
                 msg = f"{c_rel} has no sibling AGENTS.md and is {c_bytes} bytes; it is acting as an independent instruction file, outside the AGENTS.md/CLAUDE.md model"
                 findings.append(finding("rival", "warning", c_rel, msg))
                 status = "warning"
@@ -305,16 +302,13 @@ def commits_touching_other_files(log_output, doc_set, docs_prefix):
             count += 1
     return count
 
-def repo_relative_prefix(root):
+def repo_relative_prefix(root, toplevel):
     """ROOT's path relative to the repo's top-level directory, as a posix
     prefix ("" if ROOT is the repo root; None if undeterminable). `git log
     --name-only` reports paths relative to the repo root, never to ROOT, so
     anything compared against that output needs this to line the two up."""
-    top = run_git(root, "rev-parse", "--show-toplevel")
-    if top.returncode != 0:
-        return None
     try:
-        rel = os.path.relpath(str(root), top.stdout.strip()).replace(os.sep, "/")
+        rel = os.path.relpath(str(root), toplevel).replace(os.sep, "/")
     except ValueError:
         return None
     return "" if rel == "." else rel
@@ -323,22 +317,24 @@ def check_stale(root, doc_rel_paths, threshold):
     """Skip silently if there's no usable git history: no git, not a repo,
     no commits, or a shallow clone, which cannot answer this question at
     all (reporting nothing is correct; reporting zero would be a lie)."""
-    if shutil.which("git") is None:
-        return None, []
     try:
-        head = run_git(root, "rev-parse", "HEAD")
+        info = run_git(root, "rev-parse", "HEAD", "--is-shallow-repository", "--show-toplevel")
     except OSError:
         return None, []
-    if head.returncode != 0:
+    if info.returncode != 0:
         return None, []
-    shallow = run_git(root, "rev-parse", "--is-shallow-repository")
-    if shallow.returncode != 0 or shallow.stdout.strip() != "false":
+    info_lines = info.stdout.splitlines()
+    if len(info_lines) != 3:
         return None, []
-    prefix = repo_relative_prefix(root)
+    _head, shallow, toplevel = info_lines
+    if shallow != "false":
+        return None, []
+    prefix = repo_relative_prefix(root, toplevel)
     if prefix is None:
         return None, []
 
-    pathspecs = list(doc_rel_paths) + ["docs"]
+    docs_dirname = "docs"
+    pathspecs = list(doc_rel_paths) + [docs_dirname]
     last = run_git(root, "log", "-1", "--format=%H %ad", "--date=short", "--", *pathspecs)
     if last.returncode != 0:
         return None, []
@@ -350,8 +346,8 @@ def check_stale(root, doc_rel_paths, threshold):
     since = run_git(root, "log", "--format=%x00%H", "--name-only", f"{docs_commit}..HEAD")
     if since.returncode != 0:
         return None, []
-    doc_set = {posix_join(prefix, p) for p in doc_rel_paths}
-    docs_prefix = posix_join(prefix, "docs") + "/"
+    doc_set = {posixpath.join(prefix, p) for p in doc_rel_paths}
+    docs_prefix = posixpath.join(prefix, docs_dirname) + "/"
     commits_since = commits_touching_other_files(since.stdout, doc_set, docs_prefix)
 
     stale_info = {
@@ -377,7 +373,7 @@ def run_checks(root, threshold):
     stale_info, stale_findings = check_stale(root, agents_rel + claude_rel, threshold)
     findings += stale_findings
 
-    counts = {"error": 0, "warning": 0, "info": 0}
+    counts = dict.fromkeys(SEVERITIES, 0)
     for f in findings:
         counts[f["severity"]] += 1
 
@@ -399,8 +395,10 @@ def format_finding_line(f):
 def format_report(result):
     lines = [format_finding_line(f) for f in result["findings"]]
     counts = result["counts"]
-    lines.append(f"{counts['error']} error, {counts['warning']} warning, {counts['info']} info.")
-    lines.append("Byte budgets (2000/6000 bytes for AGENTS.md, 300 bytes for CLAUDE.md) are editorial defaults, not measured optima.")
+    lines.append(", ".join(f"{counts[s]} {s}" for s in SEVERITIES) + ".")
+    lines.append(
+        f"Byte budgets (2000/6000 bytes for AGENTS.md, {CLAUDE_MD_BYTE_THRESHOLD} bytes for CLAUDE.md) are editorial defaults, not measured optima."
+    )
     return "\n".join(lines)
 
 def build_hook_payload(result):
@@ -409,7 +407,7 @@ def build_hook_payload(result):
     if not findings:
         return None
     counts = result["counts"]
-    parts = [f"{counts[s]} {s}" for s in ("error", "warning", "info") if counts[s]]
+    parts = [f"{counts[s]} {s}" for s in SEVERITIES if counts[s]]
     top = min(findings, key=lambda f: SEVERITY_RANK[f["severity"]])
     context = f"repo-docs: {', '.join(parts)}. {top['message']}. Run the repo-docs skill in audit mode for the full report."
     if len(context) >= 600:

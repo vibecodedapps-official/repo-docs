@@ -16,14 +16,11 @@ from pathlib import Path
 from tests.helpers import REPO_ROOT, SCRIPT, can_symlink, run_checker, run_checker_json
 
 
-def _load_checker_module():
-    spec = importlib.util.spec_from_file_location("repo_docs_check", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-CHECK = _load_checker_module()
+# SCRIPT's directory is hyphenated (skills/repo-docs/...), so it cannot be
+# imported as a normal package; load it directly from its file path instead.
+_spec = importlib.util.spec_from_file_location("repo_docs_check", SCRIPT)
+CHECK = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(CHECK)
 
 
 def write(path, content):
@@ -64,6 +61,19 @@ class CheckerTestCase(unittest.TestCase):
         self.tmp_path = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp_path, ignore_errors=True)
 
+    def write_bridge(self, target=None, agents="Rules.\n", claude="@AGENTS.md\n"):
+        """Write a valid AGENTS.md + CLAUDE.md import bridge under target
+        (default: tmp_path itself)."""
+        target = self.tmp_path if target is None else target
+        write(target / "AGENTS.md", agents)
+        write(target / "CLAUDE.md", claude)
+
+    def mkdir(self, name="pkg"):
+        """Create and return a fresh subdirectory of tmp_path."""
+        d = self.tmp_path / name
+        d.mkdir()
+        return d
+
 
 # ---------------------------------------------------------------------------
 # bridge
@@ -79,8 +89,7 @@ class TestBridge(CheckerTestCase):
         self.assertEqual(result["counts"]["error"], 1)
 
     def test_bridge_import_is_valid(self):
-        write(self.tmp_path / "pkg" / "AGENTS.md", "Rules for pkg.\n")
-        write(self.tmp_path / "pkg" / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(self.tmp_path / "pkg", agents="Rules for pkg.\n")
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "bridge"), [])
         self.assertEqual(result["counts"]["error"], 0)
@@ -100,8 +109,7 @@ class TestBridge(CheckerTestCase):
     def test_bridge_symlink_is_valid(self):
         if not can_symlink(self.tmp_path):
             self.skipTest("platform cannot create symlinks")
-        pkg = self.tmp_path / "pkg"
-        pkg.mkdir()
+        pkg = self.mkdir()
         write(pkg / "AGENTS.md", "Rules for pkg.\n")
         (pkg / "CLAUDE.md").symlink_to("AGENTS.md")
         result, _ = run_checker_json(self.tmp_path)
@@ -116,8 +124,7 @@ class TestBridge(CheckerTestCase):
     def test_broken_claude_symlink_is_a_finding_not_a_crash(self):
         if not can_symlink(self.tmp_path):
             self.skipTest("platform cannot create symlinks")
-        pkg = self.tmp_path / "pkg"
-        pkg.mkdir()
+        pkg = self.mkdir()
         write(pkg / "AGENTS.md", "Rules for pkg.\n")
         (pkg / "CLAUDE.md").symlink_to("does-not-exist.md")
         result, raw = run_checker_json(self.tmp_path)
@@ -129,8 +136,7 @@ class TestBridge(CheckerTestCase):
     def test_broken_agents_symlink_is_a_finding_not_a_crash(self):
         if not can_symlink(self.tmp_path):
             self.skipTest("platform cannot create symlinks")
-        pkg = self.tmp_path / "pkg"
-        pkg.mkdir()
+        pkg = self.mkdir()
         (pkg / "AGENTS.md").symlink_to("does-not-exist.md")
         write(pkg / "CLAUDE.md", "@AGENTS.md\n")
         result, raw = run_checker_json(self.tmp_path)
@@ -140,8 +146,7 @@ class TestBridge(CheckerTestCase):
     def test_hook_exits_zero_even_with_broken_symlink(self):
         if not can_symlink(self.tmp_path):
             self.skipTest("platform cannot create symlinks")
-        pkg = self.tmp_path / "pkg"
-        pkg.mkdir()
+        pkg = self.mkdir()
         (pkg / "AGENTS.md").symlink_to("does-not-exist.md")
         write(pkg / "CLAUDE.md", "@AGENTS.md\n")
         result = run_checker(self.tmp_path, "--hook")
@@ -158,8 +163,7 @@ class TestBridge(CheckerTestCase):
         because it was filtered out of the gitignore-aware scan list."""
         init_git_repo(self.tmp_path)
         write(self.tmp_path / ".gitignore", "CLAUDE.md\n")
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result, raw = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "bridge"), [])
         self.assertEqual(result["counts"]["error"], 0)
@@ -184,8 +188,7 @@ class TestBridge(CheckerTestCase):
         rather than a regular file containing @AGENTS.md."""
         if not can_symlink(self.tmp_path):
             self.skipTest("platform cannot create symlinks")
-        pkg = self.tmp_path / "pkg"
-        pkg.mkdir()
+        pkg = self.mkdir()
         (pkg / "CLAUDE.md").symlink_to("AGENTS.md")
         result, raw = run_checker_json(self.tmp_path)
         bridge_findings = findings_of(result, "bridge")
@@ -236,8 +239,7 @@ class TestRival(CheckerTestCase):
 
 class TestSize(CheckerTestCase):
     def test_size_agents_warning_over_6000(self):
-        write(self.tmp_path / "AGENTS.md", "x" * 6001)
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(agents="x" * 6001)
         result, _ = run_checker_json(self.tmp_path)
         size_findings = findings_of(result, "size")
         self.assertEqual(len(size_findings), 1)
@@ -245,16 +247,14 @@ class TestSize(CheckerTestCase):
         self.assertEqual(result["counts"]["error"], 0)
 
     def test_size_agents_ok_under_2000(self):
-        write(self.tmp_path / "AGENTS.md", "small and tidy\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(agents="small and tidy\n")
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "size"), [])
         agents_entry = next(f for f in result["files"] if f["path"] == "AGENTS.md")
         self.assertEqual(agents_entry["status"], "ok")
 
     def test_size_claude_bridge_info_over_300(self):
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n" + ("y" * 301))
+        self.write_bridge(claude="@AGENTS.md\n" + ("y" * 301))
         result, _ = run_checker_json(self.tmp_path)
         size_findings = findings_of(result, "size")
         self.assertEqual(len(size_findings), 1)
@@ -268,8 +268,7 @@ class TestSize(CheckerTestCase):
 
 class TestLink(CheckerTestCase):
     def test_link_error_missing_target(self):
-        write(self.tmp_path / "AGENTS.md", "See [guide](docs/missing.md) for details.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(agents="See [guide](docs/missing.md) for details.\n")
         result, _ = run_checker_json(self.tmp_path)
         link_findings = findings_of(result, "link")
         self.assertEqual(len(link_findings), 1)
@@ -286,8 +285,7 @@ class TestLink(CheckerTestCase):
             "Backticked code that looks like a path: `docs/fake.md`\n"
             "Existing target: [real](docs/real.md)\n"
         )
-        write(self.tmp_path / "AGENTS.md", content)
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(agents=content)
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "link"), [])
         self.assertEqual(result["counts"]["error"], 0)
@@ -306,8 +304,7 @@ class TestLink(CheckerTestCase):
             "[other](also/missing.md)\n"
             "~~~\n"
         )
-        write(self.tmp_path / "AGENTS.md", content)
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(agents=content)
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "link"), [])
         self.assertEqual(result["counts"]["error"], 0)
@@ -337,8 +334,7 @@ class TestGitignore(CheckerTestCase):
         init_git_repo(self.tmp_path)
         write(self.tmp_path / ".gitignore", "scratch/\n")
         write(self.tmp_path / "scratch" / "café" / "AGENTS.md", "ignored rules\n")
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result, _ = run_checker_json(self.tmp_path)
         agents_paths = [f["path"] for f in result["files"] if f["bridge"] is not None]
         self.assertEqual(agents_paths, ["AGENTS.md"])
@@ -348,8 +344,7 @@ class TestGitignore(CheckerTestCase):
         init_git_repo(self.tmp_path)
         write(self.tmp_path / ".gitignore", "scratch/\n")
         write(self.tmp_path / "scratch" / "wei\nrd" / "AGENTS.md", "ignored rules\n")
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result, _ = run_checker_json(self.tmp_path)
         agents_paths = [f["path"] for f in result["files"] if f["bridge"] is not None]
         self.assertEqual(agents_paths, ["AGENTS.md"])
@@ -362,8 +357,7 @@ class TestGitignore(CheckerTestCase):
 class TestStale(CheckerTestCase):
     def test_stale_fires_over_threshold(self):
         init_git_repo(self.tmp_path)
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         git_commit(self.tmp_path, "add docs")
         for name in ("a", "b", "c"):
             write(self.tmp_path / "src" / f"{name}.txt", name)
@@ -379,8 +373,7 @@ class TestStale(CheckerTestCase):
 
     def test_stale_silent_under_threshold(self):
         init_git_repo(self.tmp_path)
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         git_commit(self.tmp_path, "add docs")
         write(self.tmp_path / "src" / "a.txt", "a")
         git_commit(self.tmp_path, "add a")
@@ -418,8 +411,7 @@ class TestStale(CheckerTestCase):
         )
 
     def test_stale_skipped_when_not_a_git_repo(self):
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result, raw = run_checker_json(self.tmp_path)
         self.assertEqual(raw.returncode, 0)
         self.assertEqual(result["stale"], {"checked": False})
@@ -427,8 +419,7 @@ class TestStale(CheckerTestCase):
 
     def test_stale_skipped_when_no_commits(self):
         init_git_repo(self.tmp_path)
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result, raw = run_checker_json(self.tmp_path)
         self.assertEqual(raw.returncode, 0)
         self.assertEqual(result["stale"], {"checked": False})
@@ -439,8 +430,7 @@ class TestStale(CheckerTestCase):
         are not ROOT's own docs, and must still count toward ROOT's staleness,
         not be silently swallowed by a bare "docs/" prefix check."""
         init_git_repo(self.tmp_path)
-        write(self.tmp_path / "sub" / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "sub" / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(self.tmp_path / "sub")
         git_commit(self.tmp_path, "add sub docs")
         for name in ("a", "b", "c"):
             write(self.tmp_path / "docs" / f"{name}.md", name)
@@ -456,11 +446,9 @@ class TestStale(CheckerTestCase):
         """A shallow clone (fetch-depth: 1, as actions/checkout@v4 defaults to)
         cannot answer "commits since docs last changed" at all: reporting
         nothing is correct, reporting a confident zero is a lie."""
-        source = self.tmp_path / "source"
-        source.mkdir()
+        source = self.mkdir("source")
         init_git_repo(source)
-        write(source / "AGENTS.md", "Rules.\n")
-        write(source / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge(source)
         git_commit(source, "add docs")
         write(source / "src" / "a.txt", "a")
         git_commit(source, "add a")
@@ -485,8 +473,7 @@ class TestStale(CheckerTestCase):
 
 class TestExitCodes(CheckerTestCase):
     def test_exit_code_0_when_clean(self):
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result = run_checker(self.tmp_path)
         self.assertEqual(result.returncode, 0)
 
@@ -505,8 +492,7 @@ class TestExitCodes(CheckerTestCase):
 
 class TestHook(CheckerTestCase):
     def test_hook_silent_when_clean(self):
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result = run_checker(self.tmp_path, "--hook")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
@@ -527,8 +513,7 @@ class TestHook(CheckerTestCase):
 
 class TestJsonShape(CheckerTestCase):
     def test_json_output_has_documented_keys(self):
-        write(self.tmp_path / "AGENTS.md", "Rules.\n")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        self.write_bridge()
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(
             set(result.keys()), {"root", "ok", "counts", "findings", "files", "stale"}

@@ -88,6 +88,23 @@ class TestBridge(CheckerTestCase):
         self.assertIn("pkg/AGENTS.md", bridge_findings[0]["path"])
         self.assertEqual(result["counts"]["error"], 1)
 
+    def test_missing_bridge_fix_creates_the_file(self):
+        """Nothing is there yet, so the redirect that creates it is safe."""
+        write(self.tmp_path / "pkg" / "AGENTS.md", "Rules for pkg.\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertIn("printf", findings_of(result, "bridge")[0]["fix"])
+
+    def test_existing_bridge_fix_does_not_truncate_the_file(self):
+        """A CLAUDE.md that exists may hold rules AGENTS.md does not. The
+        suggested fix must not be a shell redirect, which would delete them."""
+        pkg = self.mkdir("pkg")
+        write(pkg / "AGENTS.md", "Rules for pkg.\n")
+        write(pkg / "CLAUDE.md", "Never deploy without approval.\n")
+        result, _ = run_checker_json(self.tmp_path)
+        fix = findings_of(result, "bridge")[0]["fix"]
+        self.assertNotIn(">", fix)
+        self.assertIn("keeping the rest of the file", fix)
+
     def test_bridge_import_is_valid(self):
         self.write_bridge(self.tmp_path / "pkg", agents="Rules for pkg.\n")
         result, _ = run_checker_json(self.tmp_path)
@@ -308,6 +325,25 @@ class TestLink(CheckerTestCase):
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "link"), [])
         self.assertEqual(result["counts"]["error"], 0)
+
+    def test_percent_encoded_link_to_existing_file_is_not_an_error(self):
+        """A markdown destination may be percent-encoded, so `docs/a%20b.md`
+        points at the file `docs/a b.md`. The file is there, so nothing is
+        broken and the documented CI check must not fail."""
+        docs = self.mkdir("docs")
+        write(docs / "setup guide.md", "How to set up.\n")
+        self.write_bridge(agents="See [guide](docs/setup%20guide.md).\n")
+        result, proc = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+        self.assertEqual(result["counts"]["error"], 0)
+        self.assertEqual(proc.returncode, 0)
+
+    def test_percent_encoded_link_to_missing_file_is_still_an_error(self):
+        """Decoding the destination must not blind the check to a real miss."""
+        self.write_bridge(agents="See [guide](docs/setup%20guide.md).\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(len(findings_of(result, "link")), 1)
+        self.assertEqual(result["counts"]["error"], 1)
 
     def test_symlink_bridge_does_not_double_report_broken_links(self):
         """A CLAUDE.md symlinked to its sibling AGENTS.md has identical content

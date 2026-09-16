@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"}
 CLAUDE_MD_BYTE_THRESHOLD = 300
@@ -110,11 +111,15 @@ def bridge_status(root, a_dir, a_rel):
     Claude Code still loads it, so it must not be reported as missing."""
     c_rel = posixpath.join(a_dir, "CLAUDE.md")
     c_path, a_path = root / c_rel, root / a_rel
-    fix = f"printf '@AGENTS.md\\n' > {c_rel}"
+    # `>` truncates, so it is only safe when nothing is there yet. An existing
+    # CLAUDE.md may hold rules that AGENTS.md does not, and a fix that deletes
+    # them is worse than the finding it closes.
+    create_fix = f"printf '@AGENTS.md\\n' > {c_rel}"
+    repair_fix = f"add '@AGENTS.md' as the first line of {c_rel}, keeping the rest of the file"
 
     if not exists_on_disk(c_path):
         msg = f"{a_rel} has no CLAUDE.md bridge; Claude Code will not load it"
-        return "missing", finding("bridge", "error", a_rel, msg, fix)
+        return "missing", finding("bridge", "error", a_rel, msg, create_fix)
 
     if c_path.is_symlink():
         if c_path.resolve() == a_path.resolve():
@@ -126,15 +131,15 @@ def bridge_status(root, a_dir, a_rel):
         text = safe_read_text(c_path)
         if text is None:
             msg = f"{c_rel} could not be read (permission error); Claude Code will not load {a_rel}"
-            return "invalid", finding("bridge", "error", c_rel, msg, fix)
+            return "invalid", finding("bridge", "error", c_rel, msg, repair_fix)
         first_line = first_nonblank_line(text)
         if first_line == "@AGENTS.md":
             return "import", None
         msg = f"{c_rel} first line is not exactly '@AGENTS.md' (mentioning it in prose does not count); Claude Code will not load {a_rel}"
-        return "invalid", finding("bridge", "error", c_rel, msg, fix)
+        return "invalid", finding("bridge", "error", c_rel, msg, repair_fix)
 
     msg = f"{c_rel} is not a regular file or symlink; Claude Code will not load {a_rel}"
-    return "invalid", finding("bridge", "error", c_rel, msg, fix)
+    return "invalid", finding("bridge", "error", c_rel, msg, repair_fix)
 
 def agents_size_finding(a_rel, a_bytes):
     if a_bytes <= 2000:
@@ -252,6 +257,17 @@ def link_targets(line):
         if target:
             yield target
 
+def link_target_exists(root, base_dir, target):
+    """A markdown link destination may be percent-encoded, so `docs/a%20b.md`
+    points at the file `docs/a b.md`. Accept either spelling: a file that is
+    really there must never be reported as a broken link."""
+    for candidate in (unquote(target), target):
+        base = root if candidate.startswith("/") else base_dir
+        if (base / candidate.lstrip("/")).exists():
+            return True
+    return False
+
+
 def check_links(root, rel_paths):
     findings = []
     seen_real_paths = set()
@@ -273,8 +289,7 @@ def check_links(root, rel_paths):
                 remainder = target.split("#", 1)[0]
                 if not remainder or not remainder.lower().endswith(LINK_EXTS):
                     continue
-                resolved = root / remainder.lstrip("/") if remainder.startswith("/") else base_dir / remainder
-                if not resolved.exists():
+                if not link_target_exists(root, base_dir, remainder):
                     msg = f"{rel} links to '{remainder}', which does not exist"
                     findings.append(finding("link", "error", rel, msg))
     return findings

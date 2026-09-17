@@ -439,6 +439,55 @@ class TestSize(CheckerTestCase):
 # link
 
 class TestLink(CheckerTestCase):
+    def test_link_fence_with_trailing_text_does_not_close_block(self):
+        """Per CommonMark a closing fence may carry only whitespace. A line
+        like ```not-a-close inside a block is content, so the link after it
+        is still an example, not a live link."""
+        self.write_bridge(agents="```\n```not-a-closing-fence\n[x](missing.md)\n```\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_fence_inside_blockquote_is_ignored(self):
+        self.write_bridge(agents="> ```\n> [x](missing.md)\n> ```\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_angle_bracket_target_is_checked(self):
+        self.write_bridge(agents="See [x](<missing.md>) and [y](<docs/real one.md>).\n")
+        write(self.tmp_path / "docs" / "real one.md", "content\n")
+        result, _ = run_checker_json(self.tmp_path)
+        link_findings = findings_of(result, "link")
+        self.assertEqual(len(link_findings), 1)
+        self.assertIn("missing.md", link_findings[0]["message"])
+
+    def test_link_backslash_escape_resolves_to_real_file(self):
+        write(self.tmp_path / "a_b.md", "content\n")
+        self.write_bridge(agents="See [x](a\\_b.md).\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_percent_encoded_extension_is_still_checked(self):
+        self.write_bridge(agents="See [x](missing%2Emd).\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(len(findings_of(result, "link")), 1)
+
+    def test_link_dead_link_inside_docs_is_an_error(self):
+        self.write_bridge(agents="See [guide](docs/guide.md).\n")
+        write(self.tmp_path / "docs" / "guide.md", "See [more](deep/missing.md) and [ok](../AGENTS.md).\n")
+        result, raw = run_checker_json(self.tmp_path)
+        link_findings = findings_of(result, "link")
+        self.assertEqual(len(link_findings), 1)
+        self.assertEqual(link_findings[0]["path"], "docs/guide.md")
+        self.assertEqual(raw.returncode, 1)
+
+    def test_link_gitignored_docs_file_is_not_scanned(self):
+        init_git_repo(self.tmp_path)
+        write(self.tmp_path / ".gitignore", "docs/generated/\n")
+        self.write_bridge()
+        write(self.tmp_path / "docs" / "generated" / "api.md", "[x](missing.md)\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
     def test_link_error_missing_target(self):
         self.write_bridge(agents="See [guide](docs/missing.md) for details.\n")
         result, _ = run_checker_json(self.tmp_path)

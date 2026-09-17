@@ -196,8 +196,9 @@ Exit codes:
    `AGENTS.md` is acting as an independent instruction file.
 3. `size` (info above 2000 bytes, warning above 6000 bytes): byte size of
    each `AGENTS.md`, measured as UTF-8 bytes on disk.
-4. `link` (error): a markdown inline link inside a scanned file whose
-   local-file target does not exist on disk.
+4. `link` (error): a markdown inline link inside `AGENTS.md`, `CLAUDE.md`,
+   or any `.md` under the root `docs/` whose local-file target does not
+   exist on disk. Links inside fenced code blocks are ignored.
 5. `stale` (info): the instruction files have not changed in longer than
    the staleness threshold, measured in commits touching other files.
 

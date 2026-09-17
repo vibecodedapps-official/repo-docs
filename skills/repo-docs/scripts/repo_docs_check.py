@@ -29,6 +29,8 @@ CLAUDE_MD_BYTE_THRESHOLD = 300
 LINK_EXTS = (".md", ".markdown", ".txt", ".json", ".yml", ".yaml", ".toml", ".py", ".sh", ".js", ".ts")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
+MD_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+DOCS_DIR = "docs"
 SEVERITIES = ("error", "warning", "info")
 SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
@@ -97,10 +99,11 @@ def filter_gitignored(root, rel_paths):
     return {p.decode("utf-8", errors="replace") for p in proc.stdout.split(b"\x00") if p}
 
 def collect_paths(root):
-    """Find AGENTS.md and CLAUDE.md, honoring the static and .gitignore
-    exclusions. docs/**/*.md is not collected: the stale check just uses
-    the "docs" git pathspec, which matches that whole subtree already."""
-    agents, claude = [], []
+    """Find AGENTS.md, CLAUDE.md, and every .md under the root docs/ dir,
+    honoring the static and .gitignore exclusions. Returns three lists.
+    The docs list feeds only the link check; the stale check uses the
+    "docs" git pathspec, which matches that whole subtree already."""
+    agents, claude, docs = [], [], []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         for name in filenames:
@@ -109,9 +112,11 @@ def collect_paths(root):
                 agents.append(rel)
             elif name == "CLAUDE.md":
                 claude.append(rel)
-    ignored = filter_gitignored(root, agents + claude)
+            elif rel.startswith(DOCS_DIR + "/") and name.lower().endswith(".md"):
+                docs.append(rel)
+    ignored = filter_gitignored(root, agents + claude + docs)
     keep = lambda paths: [p for p in paths if p not in ignored]
-    return keep(agents), keep(claude)
+    return keep(agents), keep(claude), keep(docs)
 
 
 # ---------------------------------------------------------------------------
@@ -246,12 +251,15 @@ def analyze_docs(root, agents_rel, claude_rel):
 # ---------------------------------------------------------------------------
 # link
 
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+# A fence may sit inside a blockquote, so allow any run of "> " prefixes.
+FENCE_RE = re.compile(r"^\s*(?:>\s*)*(`{3,}|~{3,})(.*)$")
 
 def strip_fenced_code_blocks(text):
     """Blank fenced code blocks (``` or ~~~, 3+ chars) so link syntax shown
     as a documentation example is never read as a real link. A closing
-    fence must match the opening character and be at least as long."""
+    fence must match the opening character, be at least as long, and
+    carry nothing but whitespace after it (CommonMark); an opening fence
+    may carry an info string."""
     out_lines = []
     fence = None
     for line in text.splitlines():
@@ -262,17 +270,23 @@ def strip_fenced_code_blocks(text):
             continue
         if fence is not None:
             out_lines.append("")
-            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence):
+            if (match and match.group(1)[0] == fence[0]
+                    and len(match.group(1)) >= len(fence) and not match.group(2).strip()):
                 fence = None
             continue
         out_lines.append(line)
     return "\n".join(out_lines)
 
 def link_targets(line):
+    """Yield each inline link destination, with the CommonMark <...> wrapper
+    removed and backslash escapes (a\\_b.md) undone."""
     for match in LINK_RE.finditer(CODE_SPAN_RE.sub("", line)):
         target = match.group(1).strip()
-        if " " in target:
+        if target.startswith("<") and ">" in target:
+            target = target[1:target.index(">")]
+        elif " " in target:
             target = target.split(" ", 1)[0]
+        target = MD_ESCAPE_RE.sub(r"\1", target)
         if target:
             yield target
 
@@ -303,10 +317,11 @@ def check_links(root, rel_paths):
             for target in link_targets(line):
                 if "://" in target or target.startswith("mailto:"):
                     continue
-                if target.startswith("#") or target.startswith("<"):
+                if target.startswith("#"):
                     continue
                 remainder = target.split("#", 1)[0]
-                if not remainder or not remainder.lower().endswith(LINK_EXTS):
+                # Decode before the extension test so missing%2Emd is not skipped.
+                if not remainder or not unquote(remainder).lower().endswith(LINK_EXTS):
                     continue
                 if not link_target_exists(root, base_dir, remainder):
                     msg = f"{rel} links to '{remainder}', which does not exist"
@@ -401,9 +416,9 @@ def check_stale(root, doc_rel_paths, threshold):
 # report assembly
 
 def run_checks(root, threshold):
-    agents_rel, claude_rel = collect_paths(root)
+    agents_rel, claude_rel, docs_rel = collect_paths(root)
     findings, files = analyze_docs(root, agents_rel, claude_rel)
-    findings += check_links(root, agents_rel + claude_rel)
+    findings += check_links(root, agents_rel + claude_rel + docs_rel)
     stale_info, stale_findings = check_stale(root, agents_rel + claude_rel, threshold)
     findings += stale_findings
 

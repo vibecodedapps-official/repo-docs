@@ -326,6 +326,20 @@ class TestBridge(CheckerTestCase):
         self.assertEqual(findings_of(result, "rival"), [])
         self.assertEqual(raw.returncode, 1)
 
+    def test_lowercase_agents_md_on_case_insensitive_fs_is_scanned(self):
+        """On a case-insensitive filesystem, agents.md is the file Claude Code
+        loads through @AGENTS.md, so it must be scanned under its canonical
+        name rather than slipping past every check."""
+        write(self.tmp_path / "agents.md", "x" * 6001)
+        if not (self.tmp_path / "AGENTS.md").exists():
+            self.skipTest("filesystem is case-sensitive")
+        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        result, _ = run_checker_json(self.tmp_path)
+        size_findings = findings_of(result, "size")
+        self.assertEqual(len(size_findings), 1)
+        self.assertEqual(size_findings[0]["path"], "AGENTS.md")
+        self.assertEqual([f["path"] for f in result["files"]], ["AGENTS.md", "CLAUDE.md"])
+
     def test_import_of_agents_md_directory_is_an_error(self):
         """A directory named AGENTS.md exists on disk but cannot be imported.
         The bridge must not be certified clean because the name is taken."""

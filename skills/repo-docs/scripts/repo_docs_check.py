@@ -98,6 +98,19 @@ def filter_gitignored(root, rel_paths):
         return set()
     return {p.decode("utf-8", errors="replace") for p in proc.stdout.split(b"\x00") if p}
 
+def canonical_name(dirpath, name):
+    """On a case-insensitive filesystem, agents.md is the file an @AGENTS.md
+    import loads. Report it under the canonical name so it is scanned. On a
+    case-sensitive filesystem samefile fails and the name is left alone."""
+    for canonical in ("AGENTS.md", "CLAUDE.md"):
+        if name != canonical and name.lower() == canonical.lower():
+            try:
+                if os.path.samefile(os.path.join(dirpath, name), os.path.join(dirpath, canonical)):
+                    return canonical
+            except OSError:
+                pass
+    return name
+
 def collect_paths(root):
     """Find AGENTS.md, CLAUDE.md, and every .md under the root docs/ dir,
     honoring the static and .gitignore exclusions. Returns three lists.
@@ -107,6 +120,7 @@ def collect_paths(root):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         for name in filenames:
+            name = canonical_name(dirpath, name)
             rel = posix_rel(root, os.path.join(dirpath, name))
             if name == "AGENTS.md":
                 agents.append(rel)

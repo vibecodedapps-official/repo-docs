@@ -679,6 +679,7 @@ class TestGitignore(CheckerTestCase):
         self.assertEqual(agents_paths, ["AGENTS.md"])
         self.assertEqual(result["counts"]["error"], 0)
 
+    @unittest.skipIf(os.name == "nt", "Windows file names cannot contain a newline")
     def test_gitignore_filters_newline_path(self):
         init_git_repo(self.tmp_path)
         write(self.tmp_path / ".gitignore", "scratch/\n")

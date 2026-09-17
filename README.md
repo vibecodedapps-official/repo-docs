@@ -147,8 +147,13 @@ path to your clone or installed skill:
 
 Quote the script path inside the command if it contains spaces. The bundled
 plugin command, for Claude Code and for Codex, uses POSIX shell syntax, and
-the repair commands in findings are written for a POSIX shell. Windows hook
-execution has not been verified, and no Windows-specific command is supplied.
+the repair commands in findings are written for a POSIX shell. On Windows,
+Claude Code runs the hook in Git Bash, which handles that syntax; run the
+repair commands in Git Bash too. The hook fails there when `python3` resolves
+to the Microsoft Store stub, which a python.org install leaves in place. Turn
+off the `python3` entry under Settings > Apps > Advanced app settings > App
+execution aliases, or put a `python3` shim on `PATH`. No Windows-specific
+command is supplied.
 
 Open `/hooks` in Codex to review and trust the hook, then start a new session.
 New or changed hook definitions are skipped until trusted. The checker runs

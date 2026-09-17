@@ -236,6 +236,10 @@ the point of running one at all.
 - Numeric limits other than the byte budgets above.
 - External links.
 - Frontmatter dates.
+- Reference-style links (`[text][label]` with a `[label]: path` line).
+  Only inline `[text](path)` links are checked.
+- Code spans that run across a line break. A backticked span is skipped
+  only when it opens and closes on the same line.
 - `@imports` past the first hop. The `bridge` check confirms `CLAUDE.md`
   imports `AGENTS.md`; what `AGENTS.md` itself imports is not followed.
 - Merge commits in the `stale` count. Only non-merge commits that touch

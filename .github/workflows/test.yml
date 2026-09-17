@@ -10,18 +10,40 @@ permissions:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # AGENTS.md promises Python 3.9+, so test the floor and a current release.
         python-version: ["3.9", "3.13"]
-        # The POSIX-only tests skip themselves on Windows; the rest still run.
-        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:
           # The staleness check reads commit history; a shallow clone has none.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Check this repository with its own checker
+        run: python skills/repo-docs/scripts/repo_docs_check.py .
+
+  # A separate job so the `test (3.9)` and `test (3.13)` check names the
+  # main branch ruleset requires stay unchanged. The POSIX-only tests skip
+  # themselves on Windows; the rest still run.
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
           fetch-depth: 0
 
       - uses: actions/setup-python@v5

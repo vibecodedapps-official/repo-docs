@@ -204,7 +204,9 @@ def dangling_import(c_path, is_symlink):
     readable file elsewhere, whatever its name), so the rival check can see
     it."""
     if is_symlink:
-        target = c_path.resolve()
+        # Not resolve(): on Python 3.9 for Windows it hands back the link
+        # itself when the target is missing, so the name check never matches.
+        target = c_path.parent / os.readlink(c_path)
         target_bytes = safe_stat_size(target)
         if target_bytes is None and target.name == "AGENTS.md":
             return True, 0

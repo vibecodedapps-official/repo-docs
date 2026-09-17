@@ -1,0 +1,16 @@
+{
+  "name": "repo-docs",
+  "version": "0.1.0",
+  "description": "Keeps AGENTS.md, CLAUDE.md, and docs/ correct and progressively disclosed.",
+  "author": { "name": "vibecodedapps.net" },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "repo-docs",
+    "shortDescription": "Keep repository instructions correct",
+    "longDescription": "Check repository instructions at session start, then audit or maintain documentation with the repo-docs skill.",
+    "developerName": "vibecodedapps.net",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Use repo-docs to audit this repository's instructions."]
+  }
+}

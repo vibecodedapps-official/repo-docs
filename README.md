@@ -5,9 +5,8 @@
 # repo-docs
 
 repo-docs is a portable agent skill that keeps a repository's instruction
-files correct and progressively disclosed. It ships two ways: as a Claude
-Code plugin, so its session hook installs itself, and as a plain skill, so
-Codex and other agents can use the same methodology.
+files correct and progressively disclosed. It ships as a Claude Code or
+Codex plugin with a session hook, and as a plain skill for other agents.
 
 The core principle, unchanged wherever it is quoted:
 
@@ -96,14 +95,67 @@ need to pass the flag again every time you start Claude Code. It is meant
 for trying repo-docs out or developing against a local checkout, not for
 everyday use.
 
-### Codex and other agents
+### Codex
+
+Codex supports native `SessionStart` hooks. Install the skill from a clone
+for agent-led audits and maintenance:
 
 ```
 npx skills add ./skills/repo-docs
 ```
 
-This installs the skill without the hook. Codex has no session-hook
-equivalent, so run the checker from the repo's own checks or from CI
+The automatic hook only needs the checker script; skill installation is
+independent. Add this hook to `~/.codex/hooks.json` for all projects, or to
+`<repo>/.codex/hooks.json` for one trusted project. Merge it into any existing
+hooks rather than replacing them. Replace the script path with the absolute
+path to your clone or installed skill:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/repo-docs/skills/repo-docs/scripts/repo_docs_check.py . --hook"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Quote the script path inside the command if it contains spaces. The bundled
+plugin command uses POSIX shell syntax. Windows hook execution has not been
+verified, and no Windows-specific command is supplied.
+
+Open `/hooks` in Codex to review and trust the hook, then start a new session.
+New or changed hook definitions are skipped until trusted. The checker runs
+in the session's working directory; start Codex at the repository root to
+scan the whole repository. Findings become context for the agent; the hook
+does not edit files or force a full audit or maintain pass.
+
+For plugin distribution, `.codex-plugin/plugin.json` bundles the same skill
+and automatically discovered `hooks/hooks.json`. Codex supplies
+`CLAUDE_PLUGIN_ROOT` for compatibility; the shared command uses the session's
+working directory when `CLAUDE_PROJECT_DIR` is unset. Installed plugin hooks
+also require review and trust through `/hooks`.
+
+When releasing, keep the name, version, and description in
+`.codex-plugin/plugin.json` and `.claude-plugin/plugin.json` in sync.
+
+Source: [Codex hooks](https://learn.chatgpt.com/docs/hooks).
+
+### Other agents or skill-only installs
+
+```
+npx skills add ./skills/repo-docs
+```
+
+This installs the skill without registering a hook. For agents without
+session hooks, run the checker from the repo's own checks or from CI
 instead. See the GitHub Actions snippet below.
 
 ## Usage
@@ -124,7 +176,7 @@ repo_docs_check.py [ROOT] [--json] [--hook] [--stale-threshold N]
 
 - `ROOT` defaults to the current working directory.
 - `--json` prints one JSON object to stdout and nothing else.
-- `--hook` prints a Claude Code `SessionStart` hook payload and always
+- `--hook` prints a Claude Code / Codex `SessionStart` hook payload and always
   exits 0.
 - `--stale-threshold N` overrides the staleness threshold. Default is 20.
 

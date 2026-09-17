@@ -7,6 +7,7 @@ a checker that cries wolf on good docs gets switched off.
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -73,6 +74,51 @@ class CheckerTestCase(unittest.TestCase):
         d = self.tmp_path / name
         d.mkdir()
         return d
+
+
+@unittest.skipIf(os.name == "nt", "Exercises the POSIX hook command")
+class TestPluginHook(CheckerTestCase):
+    def run_hook(self, project_dir=None):
+        manifest = json.loads(
+            (REPO_ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue((REPO_ROOT / manifest["skills"] / "repo-docs/SKILL.md").is_file())
+        config = json.loads((REPO_ROOT / "hooks/hooks.json").read_text(encoding="utf-8"))
+        command = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        env = dict(os.environ, CLAUDE_PLUGIN_ROOT=str(REPO_ROOT))
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        if project_dir is not None:
+            env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+        return subprocess.run(
+            ["/bin/sh", "-c", command], cwd=self.tmp_path, env=env,
+            capture_output=True, text=True,
+        )
+
+    def test_codex_hook_reports_findings_from_session_directory(self):
+        write(self.tmp_path / "AGENTS.md", "Rules.\n")
+        result = self.run_hook()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(payload["hookEventName"], "SessionStart")
+        self.assertIn("1 error", payload["additionalContext"])
+
+    def test_codex_hook_is_silent_when_clean(self):
+        self.write_bridge()
+        result = self.run_hook()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout, "")
+
+    def test_claude_hook_preserves_explicit_project_directory(self):
+        project = self.mkdir("project with spaces")
+        write(project / "AGENTS.md", "Rules.\n")
+        self.write_bridge()
+        result = self.run_hook(project)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("1 error", context)
 
 
 # ---------------------------------------------------------------------------

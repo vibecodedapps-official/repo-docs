@@ -166,16 +166,18 @@ def agents_size_finding(a_rel, a_bytes):
 def dangling_import(c_path, is_symlink):
     """For a CLAUDE.md with no sibling AGENTS.md on disk: is it shaped like
     a bridge attempt (a dangling import, the inverse of the bridge check),
-    and what byte count should it report? A symlink named AGENTS.md at its
-    target, or a file whose first line is exactly '@AGENTS.md', reports 0
-    bytes and is dangling, not a rival. Anything else is a real rival
-    candidate, measured for real (including through a symlink to an
-    unrelated file), so the rival check can see it."""
+    and what byte count should it report? A broken symlink named AGENTS.md
+    at its target, or a file whose first line is exactly '@AGENTS.md',
+    reports 0 bytes and is dangling, not a rival. Anything else is a real
+    rival candidate, measured for real (including through a symlink to a
+    readable file elsewhere, whatever its name), so the rival check can see
+    it."""
     if is_symlink:
         target = c_path.resolve()
-        if target.name == "AGENTS.md":
+        target_bytes = safe_stat_size(target)
+        if target_bytes is None and target.name == "AGENTS.md":
             return True, 0
-        return False, safe_stat_size(target) or 0
+        return False, target_bytes or 0
     text = safe_read_text(c_path)
     first_line = first_nonblank_line(text) if text is not None else ""
     if first_line == "@AGENTS.md":
@@ -212,8 +214,10 @@ def analyze_docs(root, agents_rel, claude_rel):
         c_path = root / c_rel
         is_symlink = c_path.is_symlink()
         # Resolved against the filesystem, like bridge_status: a gitignored
-        # sibling AGENTS.md still exists and still bridges normally.
-        has_sibling = exists_on_disk(root / posixpath.join(c_dir, "AGENTS.md"))
+        # sibling AGENTS.md still bridges normally. It must be a readable
+        # regular file, though: a directory or a broken symlink takes the
+        # name without giving the import anything to load.
+        has_sibling = safe_stat_size(root / posixpath.join(c_dir, "AGENTS.md")) is not None
         status = "ok"
 
         if has_sibling:
@@ -226,7 +230,7 @@ def analyze_docs(root, agents_rel, claude_rel):
             is_dangling, c_bytes = dangling_import(c_path, is_symlink)
             if is_dangling:
                 expected = posixpath.join(c_dir, "AGENTS.md")
-                msg = f"{c_rel} imports AGENTS.md, but {expected} does not exist; Claude Code will load a broken import"
+                msg = f"{c_rel} imports AGENTS.md, but {expected} is not a readable file; Claude Code will load a broken import"
                 fix = f"create {expected}, or remove the @AGENTS.md import from {c_rel}"
                 findings.append(finding("bridge", "error", c_rel, msg, fix))
             elif c_bytes > CLAUDE_MD_BYTE_THRESHOLD:

@@ -326,6 +326,49 @@ class TestBridge(CheckerTestCase):
         self.assertEqual(findings_of(result, "rival"), [])
         self.assertEqual(raw.returncode, 1)
 
+    def test_import_of_agents_md_directory_is_an_error(self):
+        """A directory named AGENTS.md exists on disk but cannot be imported.
+        The bridge must not be certified clean because the name is taken."""
+        (self.tmp_path / "AGENTS.md").mkdir()
+        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        result, raw = run_checker_json(self.tmp_path)
+        bridge_findings = findings_of(result, "bridge")
+        self.assertEqual(len(bridge_findings), 1)
+        self.assertEqual(bridge_findings[0]["severity"], "error")
+        self.assertEqual(raw.returncode, 1)
+
+    def test_gitignored_broken_agents_symlink_import_is_an_error(self):
+        """A gitignored AGENTS.md is skipped by the scan, but if it is a broken
+        symlink the sibling CLAUDE.md still imports nothing. Existence on
+        disk is not enough; the import target must be readable."""
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        init_git_repo(self.tmp_path)
+        write(self.tmp_path / ".gitignore", "AGENTS.md\n")
+        (self.tmp_path / "AGENTS.md").symlink_to("missing.md")
+        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        result, raw = run_checker_json(self.tmp_path)
+        bridge_findings = findings_of(result, "bridge")
+        self.assertEqual(len(bridge_findings), 1)
+        self.assertEqual(bridge_findings[0]["severity"], "error")
+        self.assertEqual(raw.returncode, 1)
+
+    def test_symlink_to_existing_non_sibling_agents_md_is_a_rival_not_broken(self):
+        """A CLAUDE.md symlinked to an AGENTS.md in another directory loads
+        fine, so it is not a broken import. With no sibling AGENTS.md it is
+        an independent instruction file, measured by its target's size."""
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        shared = self.mkdir("shared")
+        self.write_bridge(shared, agents="x" * 5000)
+        (self.tmp_path / "CLAUDE.md").symlink_to(Path("shared") / "AGENTS.md")
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "bridge"), [])
+        rival_findings = findings_of(result, "rival")
+        self.assertEqual(len(rival_findings), 1)
+        self.assertEqual(rival_findings[0]["path"], "CLAUDE.md")
+        self.assertEqual(raw.returncode, 0)
+
 
 # ---------------------------------------------------------------------------
 # rival

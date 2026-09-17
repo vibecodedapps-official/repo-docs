@@ -42,7 +42,9 @@ not restate what `AGENTS.md` already says.
 
 ## Why the CLAUDE.md bridge exists
 
-Claude Code never reads `AGENTS.md`. There is no setting that changes this.
+Claude Code does not load `AGENTS.md` as instructions, and no setting
+changes this. Its `/init` can read one to generate a `CLAUDE.md`, but that
+is a one-time copy, not a live link.
 It does discover `CLAUDE.md` in subdirectories of the working directory, and
 it loads each one lazily, only when it reads a file in that subdirectory. A
 `CLAUDE.md` whose entire content is the single line `@AGENTS.md` expands
@@ -68,10 +70,10 @@ frontmatter loads only when Claude reads a matching file. That is a real
 scoped-loading mechanism, but it is Claude-only: Codex and other agents
 never see it. repo-docs uses `AGENTS.md` plus a bridge because the rule
 then lives in one file every agent reads, at the scope it governs. If a
-repo keeps its rules in `.claude/rules/` and a root `CLAUDE.md` with no
-`AGENTS.md`, the checker reports the root file as a `rival`. That is
-accurate: those rules are invisible to every other agent. The checker does
-not read `.claude/rules/` and does not report on it.
+repo keeps its rules in `.claude/rules/` and a root `CLAUDE.md` over 300
+bytes with no `AGENTS.md`, the checker reports the root file as a `rival`.
+That is accurate: those rules are invisible to every other agent. The
+checker does not read `.claude/rules/` and does not report on it.
 
 ## Install
 

@@ -13,6 +13,7 @@ Standard library only. Never writes or edits a file.
 """
 
 import argparse
+import html
 import json
 import os
 import posixpath
@@ -27,9 +28,14 @@ from urllib.parse import unquote
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"}
 CLAUDE_MD_BYTE_THRESHOLD = 300
 LINK_EXTS = (".md", ".markdown", ".txt", ".json", ".yml", ".yaml", ".toml", ".py", ".sh", ".js", ".ts")
-LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+# A destination is either <...> (may contain parentheses) or a run in which
+# a backslash-escaped ")" does not end the link.
+LINK_RE = re.compile(r"\[[^\]]*\]\((<[^>]*>|(?:\\.|[^)\\])+)\)")
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
 MD_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+BLOCKQUOTE_RE = re.compile(r"^((?: {0,3}>\s?)*)(.*)$")
+INDENT_RE = re.compile(r"^(?: {4}|\t)")
 DOCS_DIR = "docs"
 SEVERITIES = ("error", "warning", "info")
 SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
@@ -100,8 +106,9 @@ def filter_gitignored(root, rel_paths):
 
 def canonical_name(dirpath, name):
     """On a case-insensitive filesystem, agents.md is the file an @AGENTS.md
-    import loads. Report it under the canonical name so it is scanned. On a
-    case-sensitive filesystem samefile fails and the name is left alone."""
+    import loads. Return the canonical name so it is scanned; the caller
+    keeps the on-disk spelling for paths, so git pathspecs still match. On
+    a case-sensitive filesystem samefile fails and the name is left alone."""
     for canonical in ("AGENTS.md", "CLAUDE.md"):
         if name != canonical and name.lower() == canonical.lower():
             try:
@@ -120,11 +127,11 @@ def collect_paths(root):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         for name in filenames:
-            name = canonical_name(dirpath, name)
             rel = posix_rel(root, os.path.join(dirpath, name))
-            if name == "AGENTS.md":
+            kind = canonical_name(dirpath, name)
+            if kind == "AGENTS.md":
                 agents.append(rel)
-            elif name == "CLAUDE.md":
+            elif kind == "CLAUDE.md":
                 claude.append(rel)
             elif rel.startswith(DOCS_DIR + "/") and name.lower().endswith(".md"):
                 docs.append(rel)
@@ -206,6 +213,7 @@ def dangling_import(c_path, is_symlink):
 def analyze_docs(root, agents_rel, claude_rel):
     """Run bridge, rival, and size checks. Returns (findings, files)."""
     findings, files = [], []
+    agents_set = set(agents_rel)
 
     for a_rel in sorted(agents_rel):
         a_dir = posixpath.dirname(a_rel)
@@ -233,10 +241,12 @@ def analyze_docs(root, agents_rel, claude_rel):
         c_path = root / c_rel
         is_symlink = c_path.is_symlink()
         # Resolved against the filesystem, like bridge_status: a gitignored
-        # sibling AGENTS.md still bridges normally. It must be a readable
-        # regular file, though: a directory or a broken symlink takes the
-        # name without giving the import anything to load.
-        has_sibling = safe_stat_size(root / posixpath.join(c_dir, "AGENTS.md")) is not None
+        # sibling AGENTS.md still bridges normally. It must be readable,
+        # though: a directory, a broken symlink, or a chmod 000 file takes
+        # the name without giving the import anything to load. A scanned
+        # sibling already reports its own readability, so it counts as is.
+        sibling_rel = posixpath.join(c_dir, "AGENTS.md")
+        has_sibling = sibling_rel in agents_set or safe_read_bytes(root / sibling_rel) is not None
         status = "ok"
 
         if has_sibling:
@@ -265,42 +275,57 @@ def analyze_docs(root, agents_rel, claude_rel):
 # ---------------------------------------------------------------------------
 # link
 
-# A fence may sit inside a blockquote, so allow any run of "> " prefixes.
-FENCE_RE = re.compile(r"^\s*(?:>\s*)*(`{3,}|~{3,})(.*)$")
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
-def strip_fenced_code_blocks(text):
-    """Blank fenced code blocks (``` or ~~~, 3+ chars) so link syntax shown
-    as a documentation example is never read as a real link. A closing
-    fence must match the opening character, be at least as long, and
-    carry nothing but whitespace after it (CommonMark); an opening fence
-    may carry an info string."""
+def strip_code_blocks(text):
+    """Blank fenced code blocks (``` or ~~~, 3+ chars), indented code
+    blocks, and HTML comments, so link syntax shown as an example is never
+    read as a real link. Fences are tracked per blockquote depth: a quoted
+    fence cannot close an outer block, and leaving the blockquote ends an
+    unclosed quoted block. A closing fence must match the opening
+    character, be at least as long, and carry nothing but whitespace after
+    it (CommonMark); an opening fence may carry an info string. An indented
+    block starts only after a blank line, since it cannot interrupt a
+    paragraph."""
     out_lines = []
-    fence = None
-    for line in text.splitlines():
-        match = FENCE_RE.match(line)
-        if fence is None and match:
-            fence = match.group(1)
-            out_lines.append("")
-            continue
+    fence = None  # (marker, blockquote depth)
+    indented = prev_blank = False
+    for line in HTML_COMMENT_RE.sub("", text).splitlines():
+        prefix, rest = BLOCKQUOTE_RE.match(line).groups()
+        depth = prefix.count(">")
+        match = FENCE_RE.match(rest)
         if fence is not None:
-            out_lines.append("")
-            if (match and match.group(1)[0] == fence[0]
-                    and len(match.group(1)) >= len(fence) and not match.group(2).strip()):
-                fence = None
-            continue
-        out_lines.append(line)
+            if depth < fence[1] and rest.strip():
+                fence = None  # left the blockquote that held the fence
+            else:
+                out_lines.append("")
+                if (depth == fence[1] and match and match.group(1)[0] == fence[0][0]
+                        and len(match.group(1)) >= len(fence[0]) and not match.group(2).strip()):
+                    fence = None
+                continue
+        blank = not rest.strip()
+        if match:
+            fence = (match.group(1), depth)
+            indented = False
+        elif INDENT_RE.match(rest) and (prev_blank or indented):
+            indented = True
+        elif not blank:
+            indented = False
+        out_lines.append("" if match or indented else line)
+        prev_blank = blank
     return "\n".join(out_lines)
 
 def link_targets(line):
     """Yield each inline link destination, with the CommonMark <...> wrapper
-    removed and backslash escapes (a\\_b.md) undone."""
+    removed, backslash escapes (a\\_b.md) undone, and character references
+    (&amp;) decoded."""
     for match in LINK_RE.finditer(CODE_SPAN_RE.sub("", line)):
         target = match.group(1).strip()
-        if target.startswith("<") and ">" in target:
-            target = target[1:target.index(">")]
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1]
         elif " " in target:
             target = target.split(" ", 1)[0]
-        target = MD_ESCAPE_RE.sub(r"\1", target)
+        target = html.unescape(MD_ESCAPE_RE.sub(r"\1", target))
         if target:
             yield target
 
@@ -319,7 +344,10 @@ def check_links(root, rel_paths):
     findings = []
     seen_real_paths = set()
     for rel in sorted(rel_paths):
-        real = (root / rel).resolve()
+        try:
+            real = (root / rel).resolve()
+        except (OSError, RuntimeError):
+            continue  # symlink loop: nothing to read, and older Pythons raise here
         if real in seen_real_paths:
             continue  # a symlink bridge and its AGENTS.md are the same content
         seen_real_paths.add(real)
@@ -327,7 +355,7 @@ def check_links(root, rel_paths):
         if text is None:
             continue  # unreadable file: the bridge/size checks already flag it
         base_dir = (root / rel).parent
-        for line in strip_fenced_code_blocks(text).splitlines():
+        for line in strip_code_blocks(text).splitlines():
             for target in link_targets(line):
                 if "://" in target or target.startswith("mailto:"):
                     continue

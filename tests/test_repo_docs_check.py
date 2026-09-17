@@ -333,12 +333,32 @@ class TestBridge(CheckerTestCase):
         write(self.tmp_path / "agents.md", "x" * 6001)
         if not (self.tmp_path / "AGENTS.md").exists():
             self.skipTest("filesystem is case-sensitive")
-        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
-        result, _ = run_checker_json(self.tmp_path)
+        write(self.tmp_path / "claude.md", "@AGENTS.md\n")
+        init_git_repo(self.tmp_path)
+        git_commit(self.tmp_path, "docs")
+        write(self.tmp_path / "code.py", "x = 1\n")
+        git_commit(self.tmp_path, "code")
+        result, _ = run_checker_json(self.tmp_path, "--stale-threshold", "0")
         size_findings = findings_of(result, "size")
         self.assertEqual(len(size_findings), 1)
-        self.assertEqual(size_findings[0]["path"], "AGENTS.md")
-        self.assertEqual([f["path"] for f in result["files"]], ["AGENTS.md", "CLAUDE.md"])
+        # The on-disk spelling is kept so git pathspecs still match.
+        self.assertEqual(size_findings[0]["path"], "agents.md")
+        self.assertEqual([f["path"] for f in result["files"]], ["agents.md", "claude.md"])
+        self.assertTrue(result["stale"]["checked"])
+        self.assertEqual(len(findings_of(result, "stale")), 1)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions as non-root")
+    def test_gitignored_unreadable_agents_md_import_is_an_error(self):
+        """A gitignored AGENTS.md is not scanned, so its own readability is
+        never checked. The importing CLAUDE.md must check it instead."""
+        init_git_repo(self.tmp_path)
+        write(self.tmp_path / ".gitignore", "AGENTS.md\n")
+        self.write_bridge()
+        (self.tmp_path / "AGENTS.md").chmod(0)
+        self.addCleanup((self.tmp_path / "AGENTS.md").chmod, 0o644)
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(len(findings_of(result, "bridge")), 1)
+        self.assertEqual(raw.returncode, 1)
 
     def test_import_of_agents_md_directory_is_an_error(self):
         """A directory named AGENTS.md exists on disk but cannot be imported.
@@ -466,6 +486,33 @@ class TestLink(CheckerTestCase):
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "link"), [])
 
+    def test_link_quoted_fence_cannot_close_outer_block(self):
+        self.write_bridge(agents="```markdown\n> ```\n[x](missing.md)\n```\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_leaving_blockquote_ends_its_fence(self):
+        self.write_bridge(agents="> ```\n> sample\n\n[x](missing.md)\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(len(findings_of(result, "link")), 1)
+
+    def test_link_indented_code_and_html_comment_are_ignored(self):
+        self.write_bridge(agents="See [guide](docs/guide.md).\n")
+        write(self.tmp_path / "docs" / "guide.md",
+              "Example:\n\n    [x](missing.md)\n\n<!-- [y](missing.md)\n[z](missing.md) -->\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_symlink_loop_in_docs_is_skipped_not_fatal(self):
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        write(self.tmp_path / "AGENTS.md", "Rules.\n")
+        (self.tmp_path / "docs").mkdir()
+        (self.tmp_path / "docs" / "loop.md").symlink_to("loop.md")
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(raw.returncode, 1)
+        self.assertEqual(len(findings_of(result, "bridge")), 1)
+
     def test_link_angle_bracket_target_is_checked(self):
         self.write_bridge(agents="See [x](<missing.md>) and [y](<docs/real one.md>).\n")
         write(self.tmp_path / "docs" / "real one.md", "content\n")
@@ -473,6 +520,21 @@ class TestLink(CheckerTestCase):
         link_findings = findings_of(result, "link")
         self.assertEqual(len(link_findings), 1)
         self.assertIn("missing.md", link_findings[0]["message"])
+
+    def test_link_destination_edge_syntax(self):
+        """Parentheses inside <...>, character references, and an escaped
+        closing parenthesis are all valid CommonMark destinations."""
+        write(self.tmp_path / "real.md).txt", "x\n")
+        write(self.tmp_path / "a&b.md", "x\n")
+        self.write_bridge(agents=(
+            "[a](<real.md).txt>)\n"
+            "[b](<a&amp;b.md>)\n"
+            "[c](missing\\)file.md)\n"
+        ))
+        result, _ = run_checker_json(self.tmp_path)
+        link_findings = findings_of(result, "link")
+        self.assertEqual(len(link_findings), 1)
+        self.assertIn("missing)file.md", link_findings[0]["message"])
 
     def test_link_backslash_escape_resolves_to_real_file(self):
         write(self.tmp_path / "a_b.md", "content\n")

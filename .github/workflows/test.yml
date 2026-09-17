@@ -31,3 +31,27 @@ jobs:
 
       - name: Check this repository with its own checker
         run: python skills/repo-docs/scripts/repo_docs_check.py .
+
+  # A separate job so the `test (3.9)` and `test (3.13)` check names the
+  # main branch ruleset requires stay unchanged. The POSIX-only tests skip
+  # themselves on Windows; the rest still run.
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Check this repository with its own checker
+        run: python skills/repo-docs/scripts/repo_docs_check.py .

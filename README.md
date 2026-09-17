@@ -56,7 +56,22 @@ subtree. This is also the progressive disclosure mechanism: the root bridge
 loads on every session, and nested bridges load only when Claude actually
 works in that part of the tree.
 
-Source: https://code.claude.com/docs/en/memory
+Source: https://code.claude.com/docs/en/memory, last checked 2026-09-17.
+The `bridge` error rests on this fact. If Claude Code ever starts reading
+`AGENTS.md` on its own, re-check that page and retire the `bridge` check
+rather than leaving it to fire on every session.
+
+### Why bridges rather than `.claude/rules/`
+
+Claude Code also loads `.claude/rules/*.md`, and a rule file with `paths:`
+frontmatter loads only when Claude reads a matching file. That is a real
+scoped-loading mechanism, but it is Claude-only: Codex and other agents
+never see it. repo-docs uses `AGENTS.md` plus a bridge because the rule
+then lives in one file every agent reads, at the scope it governs. If a
+repo keeps its rules in `.claude/rules/` and a root `CLAUDE.md` with no
+`AGENTS.md`, the checker reports the root file as a `rival`. That is
+accurate: those rules are invisible to every other agent. The checker does
+not read `.claude/rules/` and does not report on it.
 
 ## Install
 
@@ -128,8 +143,9 @@ path to your clone or installed skill:
 ```
 
 Quote the script path inside the command if it contains spaces. The bundled
-plugin command uses POSIX shell syntax. Windows hook execution has not been
-verified, and no Windows-specific command is supplied.
+plugin command, for Claude Code and for Codex, uses POSIX shell syntax, and
+the repair commands in findings are written for a POSIX shell. Windows hook
+execution has not been verified, and no Windows-specific command is supplied.
 
 Open `/hooks` in Codex to review and trust the hook, then start a new session.
 New or changed hook definitions are skipped until trusted. The checker runs
@@ -217,6 +233,10 @@ the point of running one at all.
 - Numeric limits other than the byte budgets above.
 - External links.
 - Frontmatter dates.
+- `@imports` past the first hop. The `bridge` check confirms `CLAUDE.md`
+  imports `AGENTS.md`; what `AGENTS.md` itself imports is not followed.
+- Merge commits in the `stale` count. Only non-merge commits that touch
+  files outside the instruction set are counted.
 
 These are judgement calls, not mechanical ones. repo-docs leaves them to the
 skill's audit and maintain modes, where a person or an agent can read the

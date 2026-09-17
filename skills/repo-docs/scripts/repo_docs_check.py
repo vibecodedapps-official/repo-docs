@@ -28,12 +28,17 @@ from urllib.parse import unquote
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"}
 CLAUDE_MD_BYTE_THRESHOLD = 300
 LINK_EXTS = (".md", ".markdown", ".txt", ".json", ".yml", ".yaml", ".toml", ".py", ".sh", ".js", ".ts")
-# A destination is either <...> (may contain parentheses) or a run in which
-# a backslash-escaped ")" does not end the link.
-LINK_RE = re.compile(r"\[[^\]]*\]\((<[^>]*>|(?:\\.|[^)\\])+)\)")
+# A destination is either <...> (may contain parentheses), optionally
+# followed by a title, or a run in which a backslash-escaped ")" does not
+# end the link.
+LINK_RE = re.compile(r"\[[^\]]*\]\((<[^>]*>(?:\s+\"[^\"]*\")?|(?:\\.|[^)\\])+)\)")
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
-MD_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+# A backslash escape yields the literal character; otherwise a CommonMark
+# character reference (which requires its semicolon) is decoded. One pass,
+# so "\&amp;" stays "&amp;" and "&notit" stays as written.
+MD_UNESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])|(&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});)")
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
 BLOCKQUOTE_RE = re.compile(r"^((?: {0,3}>\s?)*)(.*)$")
 INDENT_RE = re.compile(r"^(?: {4}|\t)")
 DOCS_DIR = "docs"
@@ -277,20 +282,27 @@ def analyze_docs(root, agents_rel, claude_rel):
 
 FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
+def md_unescape(target):
+    return MD_UNESCAPE_RE.sub(lambda m: m.group(1) or html.unescape(m.group(2)), target)
+
 def strip_code_blocks(text):
     """Blank fenced code blocks (``` or ~~~, 3+ chars), indented code
-    blocks, and HTML comments, so link syntax shown as an example is never
-    read as a real link. Fences are tracked per blockquote depth: a quoted
-    fence cannot close an outer block, and leaving the blockquote ends an
-    unclosed quoted block. A closing fence must match the opening
-    character, be at least as long, and carry nothing but whitespace after
-    it (CommonMark); an opening fence may carry an info string. An indented
-    block starts only after a blank line, since it cannot interrupt a
-    paragraph."""
+    blocks, code spans, and HTML comments, so link syntax shown as an
+    example is never read as a real link. Fences are tracked per
+    blockquote depth: a quoted fence cannot close an outer block, and
+    leaving the blockquote ends an unclosed quoted block. A closing fence
+    must match the opening character, be at least as long, and carry
+    nothing but whitespace after it (CommonMark); an opening fence may
+    carry an info string. An indented block starts at the top of the file,
+    after a blank line, or after a heading, since it cannot interrupt a
+    paragraph. Code spans go before comments so a literal "<!--" in code is
+    not read as one; a comment is replaced by a space, not deleted, so it
+    cannot glue "[text]" to "(dest)"."""
     out_lines = []
     fence = None  # (marker, blockquote depth)
-    indented = prev_blank = False
-    for line in HTML_COMMENT_RE.sub("", text).splitlines():
+    indented = False
+    prev_blank = True
+    for line in text.splitlines():
         prefix, rest = BLOCKQUOTE_RE.match(line).groups()
         depth = prefix.count(">")
         match = FENCE_RE.match(rest)
@@ -312,20 +324,21 @@ def strip_code_blocks(text):
         elif not blank:
             indented = False
         out_lines.append("" if match or indented else line)
-        prev_blank = blank
-    return "\n".join(out_lines)
+        prev_blank = blank or bool(HEADING_RE.match(rest))
+    stripped = CODE_SPAN_RE.sub("", "\n".join(out_lines))
+    return HTML_COMMENT_RE.sub(" ", stripped)
 
 def link_targets(line):
     """Yield each inline link destination, with the CommonMark <...> wrapper
-    removed, backslash escapes (a\\_b.md) undone, and character references
-    (&amp;) decoded."""
-    for match in LINK_RE.finditer(CODE_SPAN_RE.sub("", line)):
+    and any title removed, backslash escapes (a\\_b.md) undone, and
+    character references (&amp;) decoded."""
+    for match in LINK_RE.finditer(line):
         target = match.group(1).strip()
-        if target.startswith("<") and target.endswith(">"):
-            target = target[1:-1]
+        if target.startswith("<") and ">" in target:
+            target = target[1:target.rindex(">")]
         elif " " in target:
             target = target.split(" ", 1)[0]
-        target = html.unescape(MD_ESCAPE_RE.sub(r"\1", target))
+        target = md_unescape(target)
         if target:
             yield target
 

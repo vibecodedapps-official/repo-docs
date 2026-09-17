@@ -70,8 +70,9 @@ frontmatter loads only when Claude reads a matching file. That is a real
 scoped-loading mechanism, but it is Claude-only: Codex and other agents
 never see it. repo-docs uses `AGENTS.md` plus a bridge because the rule
 then lives in one file every agent reads, at the scope it governs. If a
-repo keeps its rules in `.claude/rules/` and a root `CLAUDE.md` over 300
-bytes with no `AGENTS.md`, the checker reports the root file as a `rival`.
+repo keeps its rules in `.claude/rules/` and a standalone root `CLAUDE.md`
+over 300 bytes with no `AGENTS.md`, the checker reports the root file as a
+`rival`.
 That is accurate: those rules are invisible to every other agent. The
 checker does not read `.claude/rules/` and does not report on it.
 

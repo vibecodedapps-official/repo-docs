@@ -345,6 +345,7 @@ class TestBridge(CheckerTestCase):
         self.assertEqual(size_findings[0]["path"], "agents.md")
         self.assertEqual([f["path"] for f in result["files"]], ["agents.md", "claude.md"])
         self.assertTrue(result["stale"]["checked"])
+        self.assertEqual(result["stale"]["commits_since_docs"], 1)
         self.assertEqual(len(findings_of(result, "stale")), 1)
 
     @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions as non-root")
@@ -500,8 +501,22 @@ class TestLink(CheckerTestCase):
         self.write_bridge(agents="See [guide](docs/guide.md).\n")
         write(self.tmp_path / "docs" / "guide.md",
               "Example:\n\n    [x](missing.md)\n\n<!-- [y](missing.md)\n[z](missing.md) -->\n")
+        write(self.tmp_path / "docs" / "start.md", "    [x](missing.md)\n")
+        write(self.tmp_path / "docs" / "heading.md", "# Example\n    [x](missing.md)\n")
         result, _ = run_checker_json(self.tmp_path)
         self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_html_comment_keeps_token_boundaries(self):
+        """A comment between [text] and (dest) is not a link. Comment
+        markers inside code spans are literal, so the link between them
+        is real."""
+        self.write_bridge(agents=(
+            "[x]<!-- note -->(not-a-link.md)\n"
+            "`<!--` [y](real-link.md) `-->`\n"
+        ))
+        result, _ = run_checker_json(self.tmp_path)
+        reported = [f["message"].split("'")[1] for f in findings_of(result, "link")]
+        self.assertEqual(reported, ["real-link.md"])
 
     def test_link_symlink_loop_in_docs_is_skipped_not_fatal(self):
         if not can_symlink(self.tmp_path):
@@ -522,19 +537,27 @@ class TestLink(CheckerTestCase):
         self.assertIn("missing.md", link_findings[0]["message"])
 
     def test_link_destination_edge_syntax(self):
-        """Parentheses inside <...>, character references, and an escaped
-        closing parenthesis are all valid CommonMark destinations."""
+        """Parentheses inside <...>, character references, titles, and an
+        escaped closing parenthesis are all valid CommonMark destinations.
+        Each valid form is paired with a missing-target twin so the test
+        fails if the form is skipped rather than parsed."""
         write(self.tmp_path / "real.md).txt", "x\n")
         write(self.tmp_path / "a&b.md", "x\n")
+        write(self.tmp_path / "a&notit.md", "x\n")
+        write(self.tmp_path / "a&amp;b.md", "x\n")
         self.write_bridge(agents=(
-            "[a](<real.md).txt>)\n"
-            "[b](<a&amp;b.md>)\n"
-            "[c](missing\\)file.md)\n"
+            "[a](<real.md).txt>) [a2](<gone.md).txt>)\n"
+            "[b](<a&amp;b.md>) [b2](<gone&amp;b.md>)\n"
+            "[c](<real.md).txt> \"title\") [c2](<gone.md> \"title\")\n"
+            "[d](a&notit.md) [d2](gone&notit.md)\n"
+            "[e](a\\&amp;b.md) [e2](gone\\&amp;b.md)\n"
+            "[f](missing\\)file.md)\n"
         ))
         result, _ = run_checker_json(self.tmp_path)
-        link_findings = findings_of(result, "link")
-        self.assertEqual(len(link_findings), 1)
-        self.assertIn("missing)file.md", link_findings[0]["message"])
+        reported = sorted(f["message"].split("'")[1] for f in findings_of(result, "link"))
+        self.assertEqual(reported, sorted([
+            "gone.md).txt", "gone&b.md", "gone.md", "gone&notit.md", "gone&amp;b.md", "missing)file.md",
+        ]))
 
     def test_link_backslash_escape_resolves_to_real_file(self):
         write(self.tmp_path / "a_b.md", "content\n")

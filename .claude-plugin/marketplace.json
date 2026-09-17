@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Keeps AGENTS.md, CLAUDE.md, and docs/ correct and progressively disclosed.",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "plugins": [
     {
       "name": "repo-docs",
       "description": "Keeps AGENTS.md, CLAUDE.md, and docs/ correct and progressively disclosed.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "vibecodedapps.net"
       },

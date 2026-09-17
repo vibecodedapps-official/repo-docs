@@ -1,0 +1,11 @@
+# Editor-only tool config. Nothing here is installed or built; CI runs unittest
+# and the checker script directly (.github/workflows/test.yml).
+#
+# AGENTS.md promises Python 3.9+ and CI tests that floor. Without these pins
+# ruff and Pylance follow whatever Python the machine has, so 3.10+ syntax
+# passes in the editor and fails first in CI.
+[tool.ruff]
+target-version = "py39"
+
+[tool.pyright]
+pythonVersion = "3.9"

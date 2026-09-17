@@ -21,6 +21,7 @@ def run_checker(*args):
         [sys.executable, str(SCRIPT), *[str(a) for a in args]],
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
 

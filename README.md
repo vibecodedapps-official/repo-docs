@@ -42,7 +42,9 @@ not restate what `AGENTS.md` already says.
 
 ## Why the CLAUDE.md bridge exists
 
-Claude Code never reads `AGENTS.md`. There is no setting that changes this.
+Claude Code does not load `AGENTS.md` as instructions, and no setting
+changes this. Its `/init` can read one to generate a `CLAUDE.md`, but that
+is a one-time copy, not a live link.
 It does discover `CLAUDE.md` in subdirectories of the working directory, and
 it loads each one lazily, only when it reads a file in that subdirectory. A
 `CLAUDE.md` whose entire content is the single line `@AGENTS.md` expands
@@ -56,7 +58,23 @@ subtree. This is also the progressive disclosure mechanism: the root bridge
 loads on every session, and nested bridges load only when Claude actually
 works in that part of the tree.
 
-Source: https://code.claude.com/docs/en/memory
+Source: https://code.claude.com/docs/en/memory, last checked 2026-09-17.
+The `bridge` error rests on this fact. If Claude Code ever starts reading
+`AGENTS.md` on its own, re-check that page and retire the `bridge` check
+rather than leaving it to fire on every session.
+
+### Why bridges rather than `.claude/rules/`
+
+Claude Code also loads `.claude/rules/*.md`, and a rule file with `paths:`
+frontmatter loads only when Claude reads a matching file. That is a real
+scoped-loading mechanism, but it is Claude-only: Codex and other agents
+never see it. repo-docs uses `AGENTS.md` plus a bridge because the rule
+then lives in one file every agent reads, at the scope it governs. If a
+repo keeps its rules in `.claude/rules/` and a standalone root `CLAUDE.md`
+over 300 bytes with no `AGENTS.md`, the checker reports the root file as a
+`rival`.
+That is accurate: those rules are invisible to every other agent. The
+checker does not read `.claude/rules/` and does not report on it.
 
 ## Install
 
@@ -128,8 +146,9 @@ path to your clone or installed skill:
 ```
 
 Quote the script path inside the command if it contains spaces. The bundled
-plugin command uses POSIX shell syntax. Windows hook execution has not been
-verified, and no Windows-specific command is supplied.
+plugin command, for Claude Code and for Codex, uses POSIX shell syntax, and
+the repair commands in findings are written for a POSIX shell. Windows hook
+execution has not been verified, and no Windows-specific command is supplied.
 
 Open `/hooks` in Codex to review and trust the hook, then start a new session.
 New or changed hook definitions are skipped until trusted. The checker runs
@@ -196,8 +215,9 @@ Exit codes:
    `AGENTS.md` is acting as an independent instruction file.
 3. `size` (info above 2000 bytes, warning above 6000 bytes): byte size of
    each `AGENTS.md`, measured as UTF-8 bytes on disk.
-4. `link` (error): a markdown inline link inside a scanned file whose
-   local-file target does not exist on disk.
+4. `link` (error): a markdown inline link inside `AGENTS.md`, `CLAUDE.md`,
+   or any `.md` under the root `docs/` whose local-file target does not
+   exist on disk. Links inside fenced code blocks are ignored.
 5. `stale` (info): the instruction files have not changed in longer than
    the staleness threshold, measured in commits touching other files.
 
@@ -216,6 +236,10 @@ the point of running one at all.
 - Numeric limits other than the byte budgets above.
 - External links.
 - Frontmatter dates.
+- `@imports` past the first hop. The `bridge` check confirms `CLAUDE.md`
+  imports `AGENTS.md`; what `AGENTS.md` itself imports is not followed.
+- Merge commits in the `stale` count. Only non-merge commits that touch
+  files outside the instruction set are counted.
 
 These are judgement calls, not mechanical ones. repo-docs leaves them to the
 skill's audit and maintain modes, where a person or an agent can read the

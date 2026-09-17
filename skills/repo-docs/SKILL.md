@@ -32,8 +32,8 @@ description: Use when editing AGENTS.md, CLAUDE.md, or files under docs/; when o
 ## Platform facts (source: https://code.claude.com/docs/en/memory)
 
 1. Claude Code never reads `AGENTS.md` directly. There is no setting that changes this.
-2. Claude Code loads a directory's `CLAUDE.md` only when it reads a file in that
-   directory. Nested loading is lazy.
+2. Claude Code loads the working directory's `CLAUDE.md` and its ancestors' at startup.
+   A subdirectory's `CLAUDE.md` loads only when it reads a file in that subdirectory.
 3. `@path` imports in a `CLAUDE.md` expand when that `CLAUDE.md` loads. Relative paths
    resolve against the importing file's directory, not the project root. Max depth is
    four hops.

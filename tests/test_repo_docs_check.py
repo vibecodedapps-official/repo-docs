@@ -220,6 +220,72 @@ class TestBridge(CheckerTestCase):
         result = run_checker(self.tmp_path / "does-not-exist", "--hook")
         self.assertEqual(result.returncode, 0)
 
+    def test_hook_exits_zero_on_bad_argument(self):
+        """A malformed flag fails in argparse, before the guarded run; --hook
+        must still exit 0 so a typo in hooks.json cannot break a session."""
+        result = run_checker(self.tmp_path, "--hook", "--stale-threshold", "oops")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("invalid int value", result.stderr)
+
+    def test_bad_argument_without_hook_still_exits_two(self):
+        """The --hook exception must not swallow every parse error."""
+        result = run_checker(self.tmp_path, "--stale-threshold", "oops")
+        self.assertEqual(result.returncode, 2)
+        result = run_checker("--", "--hook", "extra")
+        self.assertEqual(result.returncode, 2)
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "platform has no named pipes")
+    def test_named_pipe_agents_md_is_a_finding_not_a_hang(self):
+        """A FIFO named AGENTS.md stats fine but blocks forever on read. The
+        checker must report it instead of hanging the session hook."""
+        os.mkfifo(self.tmp_path / "AGENTS.md")
+        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        try:
+            result, raw = run_checker_json(self.tmp_path)
+        except subprocess.TimeoutExpired:
+            self.fail("checker hung on a named pipe")
+        self.assertEqual(raw.returncode, 1)
+        self.assertTrue(any("could not be read" in f["message"] for f in result["findings"]))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions as non-root")
+    def test_unreadable_agents_md_is_a_finding_not_clean(self):
+        """chmod 000 on AGENTS.md still stats, but Claude Code cannot load it.
+        The checker must not certify it clean."""
+        self.write_bridge()
+        (self.tmp_path / "AGENTS.md").chmod(0)
+        self.addCleanup((self.tmp_path / "AGENTS.md").chmod, 0o644)
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(raw.returncode, 1)
+        self.assertTrue(any("could not be read" in f["message"] for f in result["findings"]))
+
+    @unittest.skipIf(os.name == "nt", "fix commands are POSIX shell")
+    def test_fix_commands_quote_paths(self):
+        """The suggested repair is meant to be pasted into a shell. A path
+        with a space or shell metacharacter must be quoted, or the command
+        writes to the wrong file. Both the create and the symlink repair
+        are run for real to prove they touch only the intended file."""
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        name = "my pkg; echo INJECTED #"
+        create = self.tmp_path / name
+        write(create / "AGENTS.md", "Rules.\n")
+        relink = self.tmp_path / "re link"
+        write(relink / "AGENTS.md", "Rules.\n")
+        (relink / "CLAUDE.md").symlink_to("wrong.md")
+        result, _ = run_checker_json(self.tmp_path)
+        fixes = {f["path"]: f["fix"] for f in findings_of(result, "bridge")}
+        self.assertEqual(len(fixes), 2)
+        for fix in fixes.values():
+            proc = subprocess.run(["/bin/sh", "-c", fix], cwd=self.tmp_path, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("INJECTED", proc.stdout)
+        self.assertEqual((create / "CLAUDE.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
+        self.assertEqual(os.readlink(relink / "CLAUDE.md"), "AGENTS.md")
+        self.assertFalse((self.tmp_path / "my").exists())
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "bridge"), [])
+        self.assertEqual(raw.returncode, 0)
+
     def test_gitignored_claude_md_is_still_a_valid_bridge(self):
         """A gitignored CLAUDE.md still exists on disk and Claude Code still
         loads it normally. It must not be reported as a missing bridge just
@@ -259,6 +325,84 @@ class TestBridge(CheckerTestCase):
         self.assertEqual(bridge_findings[0]["severity"], "error")
         self.assertEqual(findings_of(result, "rival"), [])
         self.assertEqual(raw.returncode, 1)
+
+    def test_lowercase_agents_md_on_case_insensitive_fs_is_scanned(self):
+        """On a case-insensitive filesystem, agents.md is the file Claude Code
+        loads through @AGENTS.md, so it must be scanned under its canonical
+        name rather than slipping past every check."""
+        write(self.tmp_path / "agents.md", "x" * 6001)
+        if not (self.tmp_path / "AGENTS.md").exists():
+            self.skipTest("filesystem is case-sensitive")
+        write(self.tmp_path / "claude.md", "@AGENTS.md\n")
+        init_git_repo(self.tmp_path)
+        git_commit(self.tmp_path, "docs")
+        write(self.tmp_path / "code.py", "x = 1\n")
+        git_commit(self.tmp_path, "code")
+        result, _ = run_checker_json(self.tmp_path, "--stale-threshold", "0")
+        size_findings = findings_of(result, "size")
+        self.assertEqual(len(size_findings), 1)
+        # The on-disk spelling is kept so git pathspecs still match.
+        self.assertEqual(size_findings[0]["path"], "agents.md")
+        self.assertEqual([f["path"] for f in result["files"]], ["agents.md", "claude.md"])
+        self.assertTrue(result["stale"]["checked"])
+        self.assertEqual(result["stale"]["commits_since_docs"], 1)
+        self.assertEqual(len(findings_of(result, "stale")), 1)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions as non-root")
+    def test_gitignored_unreadable_agents_md_import_is_an_error(self):
+        """A gitignored AGENTS.md is not scanned, so its own readability is
+        never checked. The importing CLAUDE.md must check it instead."""
+        init_git_repo(self.tmp_path)
+        write(self.tmp_path / ".gitignore", "AGENTS.md\n")
+        self.write_bridge()
+        (self.tmp_path / "AGENTS.md").chmod(0)
+        self.addCleanup((self.tmp_path / "AGENTS.md").chmod, 0o644)
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(len(findings_of(result, "bridge")), 1)
+        self.assertEqual(raw.returncode, 1)
+
+    def test_import_of_agents_md_directory_is_an_error(self):
+        """A directory named AGENTS.md exists on disk but cannot be imported.
+        The bridge must not be certified clean because the name is taken."""
+        (self.tmp_path / "AGENTS.md").mkdir()
+        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        result, raw = run_checker_json(self.tmp_path)
+        bridge_findings = findings_of(result, "bridge")
+        self.assertEqual(len(bridge_findings), 1)
+        self.assertEqual(bridge_findings[0]["severity"], "error")
+        self.assertEqual(raw.returncode, 1)
+
+    def test_gitignored_broken_agents_symlink_import_is_an_error(self):
+        """A gitignored AGENTS.md is skipped by the scan, but if it is a broken
+        symlink the sibling CLAUDE.md still imports nothing. Existence on
+        disk is not enough; the import target must be readable."""
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        init_git_repo(self.tmp_path)
+        write(self.tmp_path / ".gitignore", "AGENTS.md\n")
+        (self.tmp_path / "AGENTS.md").symlink_to("missing.md")
+        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        result, raw = run_checker_json(self.tmp_path)
+        bridge_findings = findings_of(result, "bridge")
+        self.assertEqual(len(bridge_findings), 1)
+        self.assertEqual(bridge_findings[0]["severity"], "error")
+        self.assertEqual(raw.returncode, 1)
+
+    def test_symlink_to_existing_non_sibling_agents_md_is_a_rival_not_broken(self):
+        """A CLAUDE.md symlinked to an AGENTS.md in another directory loads
+        fine, so it is not a broken import. With no sibling AGENTS.md it is
+        an independent instruction file, measured by its target's size."""
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        shared = self.mkdir("shared")
+        self.write_bridge(shared, agents="x" * 5000)
+        (self.tmp_path / "CLAUDE.md").symlink_to(Path("shared") / "AGENTS.md")
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "bridge"), [])
+        rival_findings = findings_of(result, "rival")
+        self.assertEqual(len(rival_findings), 1)
+        self.assertEqual(rival_findings[0]["path"], "CLAUDE.md")
+        self.assertEqual(raw.returncode, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +474,119 @@ class TestSize(CheckerTestCase):
 # link
 
 class TestLink(CheckerTestCase):
+    def test_link_fence_with_trailing_text_does_not_close_block(self):
+        """Per CommonMark a closing fence may carry only whitespace. A line
+        like ```not-a-close inside a block is content, so the link after it
+        is still an example, not a live link."""
+        self.write_bridge(agents="```\n```not-a-closing-fence\n[x](missing.md)\n```\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_fence_inside_blockquote_is_ignored(self):
+        self.write_bridge(agents="> ```\n> [x](missing.md)\n> ```\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_quoted_fence_cannot_close_outer_block(self):
+        self.write_bridge(agents="```markdown\n> ```\n[x](missing.md)\n```\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_leaving_blockquote_ends_its_fence(self):
+        self.write_bridge(agents="> ```\n> sample\n\n[x](missing.md)\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(len(findings_of(result, "link")), 1)
+
+    def test_link_indented_code_and_html_comment_are_ignored(self):
+        self.write_bridge(agents="See [guide](docs/guide.md).\n")
+        write(self.tmp_path / "docs" / "guide.md",
+              "Example:\n\n    [x](missing.md)\n\n<!-- [y](missing.md)\n[z](missing.md) -->\n")
+        write(self.tmp_path / "docs" / "start.md", "    [x](missing.md)\n")
+        write(self.tmp_path / "docs" / "heading.md", "# Example\n    [x](missing.md)\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_html_comment_keeps_token_boundaries(self):
+        """A comment between [text] and (dest) is not a link. Comment
+        markers inside code spans are literal, so the link between them
+        is real."""
+        self.write_bridge(agents=(
+            "[x]<!-- note -->(not-a-link.md)\n"
+            "`<!--` [y](real-link.md) `-->`\n"
+        ))
+        result, _ = run_checker_json(self.tmp_path)
+        reported = [f["message"].split("'")[1] for f in findings_of(result, "link")]
+        self.assertEqual(reported, ["real-link.md"])
+
+    def test_link_symlink_loop_in_docs_is_skipped_not_fatal(self):
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        write(self.tmp_path / "AGENTS.md", "Rules.\n")
+        (self.tmp_path / "docs").mkdir()
+        (self.tmp_path / "docs" / "loop.md").symlink_to("loop.md")
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(raw.returncode, 1)
+        self.assertEqual(len(findings_of(result, "bridge")), 1)
+
+    def test_link_angle_bracket_target_is_checked(self):
+        self.write_bridge(agents="See [x](<missing.md>) and [y](<docs/real one.md>).\n")
+        write(self.tmp_path / "docs" / "real one.md", "content\n")
+        result, _ = run_checker_json(self.tmp_path)
+        link_findings = findings_of(result, "link")
+        self.assertEqual(len(link_findings), 1)
+        self.assertIn("missing.md", link_findings[0]["message"])
+
+    def test_link_destination_edge_syntax(self):
+        """Parentheses inside <...>, character references, titles, and an
+        escaped closing parenthesis are all valid CommonMark destinations.
+        Each valid form is paired with a missing-target twin so the test
+        fails if the form is skipped rather than parsed."""
+        write(self.tmp_path / "real.md).txt", "x\n")
+        write(self.tmp_path / "a&b.md", "x\n")
+        write(self.tmp_path / "a&notit.md", "x\n")
+        write(self.tmp_path / "a&amp;b.md", "x\n")
+        self.write_bridge(agents=(
+            "[a](<real.md).txt>) [a2](<gone.md).txt>)\n"
+            "[b](<a&amp;b.md>) [b2](<gone&amp;b.md>)\n"
+            "[c](<real.md).txt> \"title\") [c2](<gone.md> \"title\")\n"
+            "[d](a&notit.md) [d2](gone&notit.md)\n"
+            "[e](a\\&amp;b.md) [e2](gone\\&amp;b.md)\n"
+            "[f](missing\\)file.md)\n"
+        ))
+        result, _ = run_checker_json(self.tmp_path)
+        reported = sorted(f["message"].split("'")[1] for f in findings_of(result, "link"))
+        self.assertEqual(reported, sorted([
+            "gone.md).txt", "gone&b.md", "gone.md", "gone&notit.md", "gone&amp;b.md", "missing)file.md",
+        ]))
+
+    def test_link_backslash_escape_resolves_to_real_file(self):
+        write(self.tmp_path / "a_b.md", "content\n")
+        self.write_bridge(agents="See [x](a\\_b.md).\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
+    def test_link_percent_encoded_extension_is_still_checked(self):
+        self.write_bridge(agents="See [x](missing%2Emd).\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(len(findings_of(result, "link")), 1)
+
+    def test_link_dead_link_inside_docs_is_an_error(self):
+        self.write_bridge(agents="See [guide](docs/guide.md).\n")
+        write(self.tmp_path / "docs" / "guide.md", "See [more](deep/missing.md) and [ok](../AGENTS.md).\n")
+        result, raw = run_checker_json(self.tmp_path)
+        link_findings = findings_of(result, "link")
+        self.assertEqual(len(link_findings), 1)
+        self.assertEqual(link_findings[0]["path"], "docs/guide.md")
+        self.assertEqual(raw.returncode, 1)
+
+    def test_link_gitignored_docs_file_is_not_scanned(self):
+        init_git_repo(self.tmp_path)
+        write(self.tmp_path / ".gitignore", "docs/generated/\n")
+        self.write_bridge()
+        write(self.tmp_path / "docs" / "generated" / "api.md", "[x](missing.md)\n")
+        result, _ = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "link"), [])
+
     def test_link_error_missing_target(self):
         self.write_bridge(agents="See [guide](docs/missing.md) for details.\n")
         result, _ = run_checker_json(self.tmp_path)

@@ -13,10 +13,13 @@ Standard library only. Never writes or edits a file.
 """
 
 import argparse
+import html
 import json
 import os
 import posixpath
 import re
+import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -25,26 +28,49 @@ from urllib.parse import unquote
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"}
 CLAUDE_MD_BYTE_THRESHOLD = 300
 LINK_EXTS = (".md", ".markdown", ".txt", ".json", ".yml", ".yaml", ".toml", ".py", ".sh", ".js", ".ts")
-LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+# A destination is either <...> (may contain parentheses), optionally
+# followed by a title, or a run in which a backslash-escaped ")" does not
+# end the link.
+LINK_RE = re.compile(r"\[[^\]]*\]\((<[^>]*>(?:\s+\"[^\"]*\")?|(?:\\.|[^)\\])+)\)")
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
+# A backslash escape yields the literal character; otherwise a CommonMark
+# character reference (which requires its semicolon) is decoded. One pass,
+# so "\&amp;" stays "&amp;" and "&notit" stays as written.
+MD_UNESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])|(&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});)")
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:\s|$)")
+BLOCKQUOTE_RE = re.compile(r"^((?: {0,3}>\s?)*)(.*)$")
+INDENT_RE = re.compile(r"^(?: {4}|\t)")
+DOCS_DIR = "docs"
 SEVERITIES = ("error", "warning", "info")
 SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
-def safe_read_text(path):
-    """UTF-8 text, bad bytes replaced, or None if the file can't be read at
-    all (broken symlink, permission error). Unreadable is a normal outcome
-    here, not a crash."""
+def safe_read_bytes(path):
+    """File content, or None if it can't be read at all (broken symlink,
+    permission error, not a regular file). Unreadable is a normal outcome
+    here, not a crash. The regular-file test comes first: a FIFO stats
+    fine and then blocks forever on read, which would hang the session
+    hook."""
+    if safe_stat_size(path) is None:
+        return None
     try:
-        return path.read_bytes().decode("utf-8", errors="replace")
+        return path.read_bytes()
     except OSError:
         return None
 
+def safe_read_text(path):
+    """UTF-8 text, bad bytes replaced, or None if the file can't be read."""
+    data = safe_read_bytes(path)
+    return None if data is None else data.decode("utf-8", errors="replace")
+
 def safe_stat_size(path):
-    """Byte size of path, or None if it can't be statted (broken symlink)."""
+    """Byte size of path, or None if it can't be statted (broken symlink)
+    or is not a regular file (directory, FIFO, socket, device)."""
     try:
-        return path.stat().st_size
+        st = path.stat()
     except OSError:
         return None
+    return st.st_size if stat.S_ISREG(st.st_mode) else None
 
 def posix_rel(root, path):
     return os.path.relpath(str(path), str(root)).replace(os.sep, "/")
@@ -83,22 +109,40 @@ def filter_gitignored(root, rel_paths):
         return set()
     return {p.decode("utf-8", errors="replace") for p in proc.stdout.split(b"\x00") if p}
 
+def canonical_name(dirpath, name):
+    """On a case-insensitive filesystem, agents.md is the file an @AGENTS.md
+    import loads. Return the canonical name so it is scanned; the caller
+    keeps the on-disk spelling for paths, so git pathspecs still match. On
+    a case-sensitive filesystem samefile fails and the name is left alone."""
+    for canonical in ("AGENTS.md", "CLAUDE.md"):
+        if name != canonical and name.lower() == canonical.lower():
+            try:
+                if os.path.samefile(os.path.join(dirpath, name), os.path.join(dirpath, canonical)):
+                    return canonical
+            except OSError:
+                pass
+    return name
+
 def collect_paths(root):
-    """Find AGENTS.md and CLAUDE.md, honoring the static and .gitignore
-    exclusions. docs/**/*.md is not collected: the stale check just uses
-    the "docs" git pathspec, which matches that whole subtree already."""
-    agents, claude = [], []
+    """Find AGENTS.md, CLAUDE.md, and every .md under the root docs/ dir,
+    honoring the static and .gitignore exclusions. Returns three lists.
+    The docs list feeds only the link check; the stale check uses the
+    "docs" git pathspec, which matches that whole subtree already."""
+    agents, claude, docs = [], [], []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         for name in filenames:
             rel = posix_rel(root, os.path.join(dirpath, name))
-            if name == "AGENTS.md":
+            kind = canonical_name(dirpath, name)
+            if kind == "AGENTS.md":
                 agents.append(rel)
-            elif name == "CLAUDE.md":
+            elif kind == "CLAUDE.md":
                 claude.append(rel)
-    ignored = filter_gitignored(root, agents + claude)
+            elif rel.startswith(DOCS_DIR + "/") and name.lower().endswith(".md"):
+                docs.append(rel)
+    ignored = filter_gitignored(root, agents + claude + docs)
     keep = lambda paths: [p for p in paths if p not in ignored]
-    return keep(agents), keep(claude)
+    return keep(agents), keep(claude), keep(docs)
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +158,7 @@ def bridge_status(root, a_dir, a_rel):
     # `>` truncates, so it is only safe when nothing is there yet. An existing
     # CLAUDE.md may hold rules that AGENTS.md does not, and a fix that deletes
     # them is worse than the finding it closes.
-    create_fix = f"printf '@AGENTS.md\\n' > {c_rel}"
+    create_fix = f"printf '@AGENTS.md\\n' > {shlex.quote(c_rel)}"
     repair_fix = f"add '@AGENTS.md' as the first line of {c_rel}, keeping the rest of the file"
 
     if not exists_on_disk(c_path):
@@ -125,7 +169,7 @@ def bridge_status(root, a_dir, a_rel):
         if c_path.resolve() == a_path.resolve():
             return "symlink", None
         msg = f"{c_rel} is a symlink but does not resolve to {a_rel}; Claude Code will not load {a_rel}"
-        return "invalid", finding("bridge", "error", c_rel, msg, f"ln -sf AGENTS.md {c_rel}")
+        return "invalid", finding("bridge", "error", c_rel, msg, f"ln -sf AGENTS.md {shlex.quote(c_rel)}")
 
     if c_path.is_file():
         text = safe_read_text(c_path)
@@ -153,16 +197,18 @@ def agents_size_finding(a_rel, a_bytes):
 def dangling_import(c_path, is_symlink):
     """For a CLAUDE.md with no sibling AGENTS.md on disk: is it shaped like
     a bridge attempt (a dangling import, the inverse of the bridge check),
-    and what byte count should it report? A symlink named AGENTS.md at its
-    target, or a file whose first line is exactly '@AGENTS.md', reports 0
-    bytes and is dangling, not a rival. Anything else is a real rival
-    candidate, measured for real (including through a symlink to an
-    unrelated file), so the rival check can see it."""
+    and what byte count should it report? A broken symlink named AGENTS.md
+    at its target, or a file whose first line is exactly '@AGENTS.md',
+    reports 0 bytes and is dangling, not a rival. Anything else is a real
+    rival candidate, measured for real (including through a symlink to a
+    readable file elsewhere, whatever its name), so the rival check can see
+    it."""
     if is_symlink:
         target = c_path.resolve()
-        if target.name == "AGENTS.md":
+        target_bytes = safe_stat_size(target)
+        if target_bytes is None and target.name == "AGENTS.md":
             return True, 0
-        return False, safe_stat_size(target) or 0
+        return False, target_bytes or 0
     text = safe_read_text(c_path)
     first_line = first_nonblank_line(text) if text is not None else ""
     if first_line == "@AGENTS.md":
@@ -172,16 +218,19 @@ def dangling_import(c_path, is_symlink):
 def analyze_docs(root, agents_rel, claude_rel):
     """Run bridge, rival, and size checks. Returns (findings, files)."""
     findings, files = [], []
+    agents_set = set(agents_rel)
 
     for a_rel in sorted(agents_rel):
         a_dir = posixpath.dirname(a_rel)
         bridge, bridge_finding = bridge_status(root, a_dir, a_rel)
         if bridge_finding:
             findings.append(bridge_finding)
-        a_bytes = safe_stat_size(root / a_rel)
+        # Read, not just stat: a chmod 000 file stats fine and still cannot load.
+        a_data = safe_read_bytes(root / a_rel)
+        a_bytes = None if a_data is None else len(a_data)
         if a_bytes is None:
-            # A broken symlink or a permission error: unreadable, not a crash.
-            msg = f"{a_rel} could not be read (broken symlink or permission error); Claude Code cannot load it"
+            # A broken symlink, a permission error, or not a regular file.
+            msg = f"{a_rel} could not be read (broken symlink, permission error, or not a regular file); Claude Code cannot load it"
             findings.append(finding("bridge", "error", a_rel, msg))
             files.append({"path": a_rel, "bytes": 0, "status": "ok", "bridge": bridge})
             continue
@@ -197,8 +246,12 @@ def analyze_docs(root, agents_rel, claude_rel):
         c_path = root / c_rel
         is_symlink = c_path.is_symlink()
         # Resolved against the filesystem, like bridge_status: a gitignored
-        # sibling AGENTS.md still exists and still bridges normally.
-        has_sibling = exists_on_disk(root / posixpath.join(c_dir, "AGENTS.md"))
+        # sibling AGENTS.md still bridges normally. It must be readable,
+        # though: a directory, a broken symlink, or a chmod 000 file takes
+        # the name without giving the import anything to load. A scanned
+        # sibling already reports its own readability, so it counts as is.
+        sibling_rel = posixpath.join(c_dir, "AGENTS.md")
+        has_sibling = sibling_rel in agents_set or safe_read_bytes(root / sibling_rel) is not None
         status = "ok"
 
         if has_sibling:
@@ -211,7 +264,7 @@ def analyze_docs(root, agents_rel, claude_rel):
             is_dangling, c_bytes = dangling_import(c_path, is_symlink)
             if is_dangling:
                 expected = posixpath.join(c_dir, "AGENTS.md")
-                msg = f"{c_rel} imports AGENTS.md, but {expected} does not exist; Claude Code will load a broken import"
+                msg = f"{c_rel} imports AGENTS.md, but {expected} is not a readable file; Claude Code will load a broken import"
                 fix = f"create {expected}, or remove the @AGENTS.md import from {c_rel}"
                 findings.append(finding("bridge", "error", c_rel, msg, fix))
             elif c_bytes > CLAUDE_MD_BYTE_THRESHOLD:
@@ -227,33 +280,65 @@ def analyze_docs(root, agents_rel, claude_rel):
 # ---------------------------------------------------------------------------
 # link
 
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
-def strip_fenced_code_blocks(text):
-    """Blank fenced code blocks (``` or ~~~, 3+ chars) so link syntax shown
-    as a documentation example is never read as a real link. A closing
-    fence must match the opening character and be at least as long."""
+def md_unescape(target):
+    return MD_UNESCAPE_RE.sub(lambda m: m.group(1) or html.unescape(m.group(2)), target)
+
+def strip_code_blocks(text):
+    """Blank fenced code blocks (``` or ~~~, 3+ chars), indented code
+    blocks, code spans, and HTML comments, so link syntax shown as an
+    example is never read as a real link. Fences are tracked per
+    blockquote depth: a quoted fence cannot close an outer block, and
+    leaving the blockquote ends an unclosed quoted block. A closing fence
+    must match the opening character, be at least as long, and carry
+    nothing but whitespace after it (CommonMark); an opening fence may
+    carry an info string. An indented block starts at the top of the file,
+    after a blank line, or after a heading, since it cannot interrupt a
+    paragraph. Code spans go before comments so a literal "<!--" in code is
+    not read as one; a comment is replaced by a space, not deleted, so it
+    cannot glue "[text]" to "(dest)"."""
     out_lines = []
-    fence = None
+    fence = None  # (marker, blockquote depth)
+    indented = False
+    prev_blank = True
     for line in text.splitlines():
-        match = FENCE_RE.match(line)
-        if fence is None and match:
-            fence = match.group(1)
-            out_lines.append("")
-            continue
+        prefix, rest = BLOCKQUOTE_RE.match(line).groups()
+        depth = prefix.count(">")
+        match = FENCE_RE.match(rest)
         if fence is not None:
-            out_lines.append("")
-            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence):
-                fence = None
-            continue
-        out_lines.append(line)
-    return "\n".join(out_lines)
+            if depth < fence[1] and rest.strip():
+                fence = None  # left the blockquote that held the fence
+            else:
+                out_lines.append("")
+                if (depth == fence[1] and match and match.group(1)[0] == fence[0][0]
+                        and len(match.group(1)) >= len(fence[0]) and not match.group(2).strip()):
+                    fence = None
+                continue
+        blank = not rest.strip()
+        if match:
+            fence = (match.group(1), depth)
+            indented = False
+        elif INDENT_RE.match(rest) and (prev_blank or indented):
+            indented = True
+        elif not blank:
+            indented = False
+        out_lines.append("" if match or indented else line)
+        prev_blank = blank or bool(HEADING_RE.match(rest))
+    stripped = CODE_SPAN_RE.sub("", "\n".join(out_lines))
+    return HTML_COMMENT_RE.sub(" ", stripped)
 
 def link_targets(line):
-    for match in LINK_RE.finditer(CODE_SPAN_RE.sub("", line)):
+    """Yield each inline link destination, with the CommonMark <...> wrapper
+    and any title removed, backslash escapes (a\\_b.md) undone, and
+    character references (&amp;) decoded."""
+    for match in LINK_RE.finditer(line):
         target = match.group(1).strip()
-        if " " in target:
+        if target.startswith("<") and ">" in target:
+            target = target[1:target.rindex(">")]
+        elif " " in target:
             target = target.split(" ", 1)[0]
+        target = md_unescape(target)
         if target:
             yield target
 
@@ -272,7 +357,10 @@ def check_links(root, rel_paths):
     findings = []
     seen_real_paths = set()
     for rel in sorted(rel_paths):
-        real = (root / rel).resolve()
+        try:
+            real = (root / rel).resolve()
+        except (OSError, RuntimeError):
+            continue  # symlink loop: nothing to read, and older Pythons raise here
         if real in seen_real_paths:
             continue  # a symlink bridge and its AGENTS.md are the same content
         seen_real_paths.add(real)
@@ -280,14 +368,15 @@ def check_links(root, rel_paths):
         if text is None:
             continue  # unreadable file: the bridge/size checks already flag it
         base_dir = (root / rel).parent
-        for line in strip_fenced_code_blocks(text).splitlines():
+        for line in strip_code_blocks(text).splitlines():
             for target in link_targets(line):
                 if "://" in target or target.startswith("mailto:"):
                     continue
-                if target.startswith("#") or target.startswith("<"):
+                if target.startswith("#"):
                     continue
                 remainder = target.split("#", 1)[0]
-                if not remainder or not remainder.lower().endswith(LINK_EXTS):
+                # Decode before the extension test so missing%2Emd is not skipped.
+                if not remainder or not unquote(remainder).lower().endswith(LINK_EXTS):
                     continue
                 if not link_target_exists(root, base_dir, remainder):
                     msg = f"{rel} links to '{remainder}', which does not exist"
@@ -382,9 +471,9 @@ def check_stale(root, doc_rel_paths, threshold):
 # report assembly
 
 def run_checks(root, threshold):
-    agents_rel, claude_rel = collect_paths(root)
+    agents_rel, claude_rel, docs_rel = collect_paths(root)
     findings, files = analyze_docs(root, agents_rel, claude_rel)
-    findings += check_links(root, agents_rel + claude_rel)
+    findings += check_links(root, agents_rel + claude_rel + docs_rel)
     stale_info, stale_findings = check_stale(root, agents_rel + claude_rel, threshold)
     findings += stale_findings
 
@@ -442,7 +531,16 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 def main(argv=None):
-    args = parse_args(argv)
+    try:
+        args = parse_args(argv)
+    except SystemExit:
+        # argparse exits before the guarded run below; a hook must never fail.
+        # Only look at real options: anything after "--" is a positional.
+        raw = sys.argv[1:] if argv is None else list(argv)
+        options = raw[:raw.index("--")] if "--" in raw else raw
+        if "--hook" in options:
+            return 0
+        raise
     root = Path(args.root).resolve()
     if not root.is_dir():
         print(f"repo_docs_check: {root} is not a directory", file=sys.stderr)

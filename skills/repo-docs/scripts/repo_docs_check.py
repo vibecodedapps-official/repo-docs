@@ -17,6 +17,8 @@ import json
 import os
 import posixpath
 import re
+import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -30,21 +32,32 @@ CODE_SPAN_RE = re.compile(r"`[^`]*`")
 SEVERITIES = ("error", "warning", "info")
 SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
-def safe_read_text(path):
-    """UTF-8 text, bad bytes replaced, or None if the file can't be read at
-    all (broken symlink, permission error). Unreadable is a normal outcome
-    here, not a crash."""
+def safe_read_bytes(path):
+    """File content, or None if it can't be read at all (broken symlink,
+    permission error, not a regular file). Unreadable is a normal outcome
+    here, not a crash. The regular-file test comes first: a FIFO stats
+    fine and then blocks forever on read, which would hang the session
+    hook."""
+    if safe_stat_size(path) is None:
+        return None
     try:
-        return path.read_bytes().decode("utf-8", errors="replace")
+        return path.read_bytes()
     except OSError:
         return None
 
+def safe_read_text(path):
+    """UTF-8 text, bad bytes replaced, or None if the file can't be read."""
+    data = safe_read_bytes(path)
+    return None if data is None else data.decode("utf-8", errors="replace")
+
 def safe_stat_size(path):
-    """Byte size of path, or None if it can't be statted (broken symlink)."""
+    """Byte size of path, or None if it can't be statted (broken symlink)
+    or is not a regular file (directory, FIFO, socket, device)."""
     try:
-        return path.stat().st_size
+        st = path.stat()
     except OSError:
         return None
+    return st.st_size if stat.S_ISREG(st.st_mode) else None
 
 def posix_rel(root, path):
     return os.path.relpath(str(path), str(root)).replace(os.sep, "/")
@@ -114,7 +127,7 @@ def bridge_status(root, a_dir, a_rel):
     # `>` truncates, so it is only safe when nothing is there yet. An existing
     # CLAUDE.md may hold rules that AGENTS.md does not, and a fix that deletes
     # them is worse than the finding it closes.
-    create_fix = f"printf '@AGENTS.md\\n' > {c_rel}"
+    create_fix = f"printf '@AGENTS.md\\n' > {shlex.quote(c_rel)}"
     repair_fix = f"add '@AGENTS.md' as the first line of {c_rel}, keeping the rest of the file"
 
     if not exists_on_disk(c_path):
@@ -125,7 +138,7 @@ def bridge_status(root, a_dir, a_rel):
         if c_path.resolve() == a_path.resolve():
             return "symlink", None
         msg = f"{c_rel} is a symlink but does not resolve to {a_rel}; Claude Code will not load {a_rel}"
-        return "invalid", finding("bridge", "error", c_rel, msg, f"ln -sf AGENTS.md {c_rel}")
+        return "invalid", finding("bridge", "error", c_rel, msg, f"ln -sf AGENTS.md {shlex.quote(c_rel)}")
 
     if c_path.is_file():
         text = safe_read_text(c_path)
@@ -178,10 +191,12 @@ def analyze_docs(root, agents_rel, claude_rel):
         bridge, bridge_finding = bridge_status(root, a_dir, a_rel)
         if bridge_finding:
             findings.append(bridge_finding)
-        a_bytes = safe_stat_size(root / a_rel)
+        # Read, not just stat: a chmod 000 file stats fine and still cannot load.
+        a_data = safe_read_bytes(root / a_rel)
+        a_bytes = None if a_data is None else len(a_data)
         if a_bytes is None:
-            # A broken symlink or a permission error: unreadable, not a crash.
-            msg = f"{a_rel} could not be read (broken symlink or permission error); Claude Code cannot load it"
+            # A broken symlink, a permission error, or not a regular file.
+            msg = f"{a_rel} could not be read (broken symlink, permission error, or not a regular file); Claude Code cannot load it"
             findings.append(finding("bridge", "error", a_rel, msg))
             files.append({"path": a_rel, "bytes": 0, "status": "ok", "bridge": bridge})
             continue
@@ -442,7 +457,16 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 def main(argv=None):
-    args = parse_args(argv)
+    try:
+        args = parse_args(argv)
+    except SystemExit:
+        # argparse exits before the guarded run below; a hook must never fail.
+        # Only look at real options: anything after "--" is a positional.
+        raw = sys.argv[1:] if argv is None else list(argv)
+        options = raw[:raw.index("--")] if "--" in raw else raw
+        if "--hook" in options:
+            return 0
+        raise
     root = Path(args.root).resolve()
     if not root.is_dir():
         print(f"repo_docs_check: {root} is not a directory", file=sys.stderr)

@@ -220,6 +220,72 @@ class TestBridge(CheckerTestCase):
         result = run_checker(self.tmp_path / "does-not-exist", "--hook")
         self.assertEqual(result.returncode, 0)
 
+    def test_hook_exits_zero_on_bad_argument(self):
+        """A malformed flag fails in argparse, before the guarded run; --hook
+        must still exit 0 so a typo in hooks.json cannot break a session."""
+        result = run_checker(self.tmp_path, "--hook", "--stale-threshold", "oops")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("invalid int value", result.stderr)
+
+    def test_bad_argument_without_hook_still_exits_two(self):
+        """The --hook exception must not swallow every parse error."""
+        result = run_checker(self.tmp_path, "--stale-threshold", "oops")
+        self.assertEqual(result.returncode, 2)
+        result = run_checker("--", "--hook", "extra")
+        self.assertEqual(result.returncode, 2)
+
+    @unittest.skipIf(not hasattr(os, "mkfifo"), "platform has no named pipes")
+    def test_named_pipe_agents_md_is_a_finding_not_a_hang(self):
+        """A FIFO named AGENTS.md stats fine but blocks forever on read. The
+        checker must report it instead of hanging the session hook."""
+        os.mkfifo(self.tmp_path / "AGENTS.md")
+        write(self.tmp_path / "CLAUDE.md", "@AGENTS.md\n")
+        try:
+            result, raw = run_checker_json(self.tmp_path)
+        except subprocess.TimeoutExpired:
+            self.fail("checker hung on a named pipe")
+        self.assertEqual(raw.returncode, 1)
+        self.assertTrue(any("could not be read" in f["message"] for f in result["findings"]))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "needs POSIX permissions as non-root")
+    def test_unreadable_agents_md_is_a_finding_not_clean(self):
+        """chmod 000 on AGENTS.md still stats, but Claude Code cannot load it.
+        The checker must not certify it clean."""
+        self.write_bridge()
+        (self.tmp_path / "AGENTS.md").chmod(0)
+        self.addCleanup((self.tmp_path / "AGENTS.md").chmod, 0o644)
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(raw.returncode, 1)
+        self.assertTrue(any("could not be read" in f["message"] for f in result["findings"]))
+
+    @unittest.skipIf(os.name == "nt", "fix commands are POSIX shell")
+    def test_fix_commands_quote_paths(self):
+        """The suggested repair is meant to be pasted into a shell. A path
+        with a space or shell metacharacter must be quoted, or the command
+        writes to the wrong file. Both the create and the symlink repair
+        are run for real to prove they touch only the intended file."""
+        if not can_symlink(self.tmp_path):
+            self.skipTest("platform cannot create symlinks")
+        name = "my pkg; echo INJECTED #"
+        create = self.tmp_path / name
+        write(create / "AGENTS.md", "Rules.\n")
+        relink = self.tmp_path / "re link"
+        write(relink / "AGENTS.md", "Rules.\n")
+        (relink / "CLAUDE.md").symlink_to("wrong.md")
+        result, _ = run_checker_json(self.tmp_path)
+        fixes = {f["path"]: f["fix"] for f in findings_of(result, "bridge")}
+        self.assertEqual(len(fixes), 2)
+        for fix in fixes.values():
+            proc = subprocess.run(["/bin/sh", "-c", fix], cwd=self.tmp_path, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("INJECTED", proc.stdout)
+        self.assertEqual((create / "CLAUDE.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
+        self.assertEqual(os.readlink(relink / "CLAUDE.md"), "AGENTS.md")
+        self.assertFalse((self.tmp_path / "my").exists())
+        result, raw = run_checker_json(self.tmp_path)
+        self.assertEqual(findings_of(result, "bridge"), [])
+        self.assertEqual(raw.returncode, 0)
+
     def test_gitignored_claude_md_is_still_a_valid_bridge(self):
         """A gitignored CLAUDE.md still exists on disk and Claude Code still
         loads it normally. It must not be reported as a missing bridge just

@@ -27,6 +27,9 @@ from urllib.parse import unquote
 
 EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__"}
 CLAUDE_MD_BYTE_THRESHOLD = 300
+# Bounds every git call so a slow or hung filesystem cannot stall the
+# session-start hook; on expiry the git-backed check is skipped.
+GIT_TIMEOUT_SECONDS = 10
 LINK_EXTS = (".md", ".markdown", ".txt", ".json", ".yml", ".yaml", ".toml", ".py", ".sh", ".js", ".ts")
 # A destination is either <...> (may contain parentheses), optionally
 # followed by a title, or a run in which a backslash-escaped ")" does not
@@ -101,9 +104,9 @@ def filter_gitignored(root, rel_paths):
         proc = subprocess.run(
             ["git", "check-ignore", "--stdin", "-z"],
             cwd=str(root), input=payload,
-            capture_output=True,
+            capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return set()
     if proc.returncode not in (0, 1):
         return set()
@@ -390,7 +393,10 @@ def check_links(root, rel_paths):
 # stale
 
 def run_git(root, *args):
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS,
+    )
 
 def commits_touching_other_files(log_output, doc_set, docs_prefix):
     """Count commits, from one `git log --format=%x00%H --name-only` stream
@@ -421,12 +427,16 @@ def repo_relative_prefix(root, toplevel):
 
 def check_stale(root, doc_rel_paths, threshold):
     """Skip silently if there's no usable git history: no git, not a repo,
-    no commits, or a shallow clone, which cannot answer this question at
-    all (reporting nothing is correct; reporting zero would be a lie)."""
+    no commits, a shallow clone, or a git call that hit GIT_TIMEOUT_SECONDS.
+    None of those can answer this question at all (reporting nothing is
+    correct; reporting zero would be a lie)."""
     try:
-        info = run_git(root, "rev-parse", "HEAD", "--is-shallow-repository", "--show-toplevel")
-    except OSError:
+        return _check_stale(root, doc_rel_paths, threshold)
+    except (OSError, subprocess.TimeoutExpired):
         return None, []
+
+def _check_stale(root, doc_rel_paths, threshold):
+    info = run_git(root, "rev-parse", "HEAD", "--is-shallow-repository", "--show-toplevel")
     if info.returncode != 0:
         return None, []
     info_lines = info.stdout.splitlines()

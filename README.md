@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/repo-docs-logo.png" alt="repo-docs — a document branching into three nodes" width="480">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/repo-docs-logo-dark.png">
+    <img src="assets/repo-docs-logo.png" alt="repo-docs — a document branching into three nodes" width="480">
+  </picture>
 </p>
 
 # repo-docs

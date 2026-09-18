@@ -115,62 +115,19 @@ everyday use.
 
 ### Codex
 
-Codex supports native `SessionStart` hooks. Install the skill from a clone
-for agent-led audits and maintenance:
+Codex supports native `SessionStart` hooks. See [docs/codex.md](docs/codex.md)
+for the skill install, the hook definition, and plugin distribution.
 
-```
-npx skills add ./skills/repo-docs
-```
+### Windows
 
-The automatic hook only needs the checker script; skill installation is
-independent. Add this hook to `~/.codex/hooks.json` for all projects, or to
-`<repo>/.codex/hooks.json` for one trusted project. Merge it into any existing
-hooks rather than replacing them. Replace the script path with the absolute
-path to your clone or installed skill:
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 /absolute/path/to/repo-docs/skills/repo-docs/scripts/repo_docs_check.py . --hook"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Quote the script path inside the command if it contains spaces. The bundled
-plugin command, for Claude Code and for Codex, uses POSIX shell syntax, and
-the repair commands in findings are written for a POSIX shell. On Windows,
-Claude Code runs the hook in Git Bash, which handles that syntax; run the
-repair commands in Git Bash too. The hook fails there when `python3` resolves
-to the Microsoft Store stub, which a python.org install leaves in place. Turn
-off the `python3` entry under Settings > Apps > Advanced app settings > App
-execution aliases, or put a `python3` shim on `PATH`. No Windows-specific
-command is supplied.
-
-Open `/hooks` in Codex to review and trust the hook, then start a new session.
-New or changed hook definitions are skipped until trusted. The checker runs
-in the session's working directory; start Codex at the repository root to
-scan the whole repository. Findings become context for the agent; the hook
-does not edit files or force a full audit or maintain pass.
-
-For plugin distribution, `.codex-plugin/plugin.json` bundles the same skill
-and automatically discovered `hooks/hooks.json`. Codex supplies
-`CLAUDE_PLUGIN_ROOT` for compatibility; the shared command uses the session's
-working directory when `CLAUDE_PROJECT_DIR` is unset. Installed plugin hooks
-also require review and trust through `/hooks`.
-
-When releasing, keep the name, version, and description in
-`.codex-plugin/plugin.json` and `.claude-plugin/plugin.json` in sync.
-
-Source: [Codex hooks](https://learn.chatgpt.com/docs/hooks).
+The bundled plugin command, for Claude Code and for Codex, uses POSIX shell
+syntax, and the repair commands in findings are written for a POSIX shell. On
+Windows, Claude Code runs the hook in Git Bash, which handles that syntax; run
+the repair commands in Git Bash too. The hook fails there when `python3`
+resolves to the Microsoft Store stub, which a python.org install leaves in
+place. Turn off the `python3` entry under Settings > Apps > Advanced app
+settings > App execution aliases, or put a `python3` shim on `PATH`. No
+Windows-specific command is supplied.
 
 ### Other agents or skill-only installs
 
@@ -249,6 +206,9 @@ the point of running one at all.
   imports `AGENTS.md`; what `AGENTS.md` itself imports is not followed.
 - Merge commits in the `stale` count. Only non-merge commits that touch
   files outside the instruction set are counted.
+- Staleness when git does not answer within 10 seconds. Each git call is
+  bounded so a slow or hung filesystem cannot stall the session hook; on
+  expiry the `stale` check is skipped, as it is in a shallow clone.
 
 These are judgement calls, not mechanical ones. repo-docs leaves them to the
 skill's audit and maintain modes, where a person or an agent can read the
@@ -285,15 +245,15 @@ jobs:
           fetch-depth: 0
       - run: |
           curl -fsSL -o repo_docs_check.py \
-            https://raw.githubusercontent.com/vibecodedapps-official/repo-docs/main/skills/repo-docs/scripts/repo_docs_check.py
+            https://raw.githubusercontent.com/vibecodedapps-official/repo-docs/v0.1.1/skills/repo-docs/scripts/repo_docs_check.py
           python3 repo_docs_check.py .
 ```
 
-The checker is one file with no dependencies beyond the standard library, so
-you can also copy `skills/repo-docs/scripts/repo_docs_check.py` into your own
-repository and run it directly. Vendoring it pins the version you reviewed and
-removes the network call, which matters if your runners have no outbound
-access.
+The URL pins a release tag; bump it when you move to a newer release. The
+checker is one file with no dependencies beyond the standard library, so you
+can also copy `skills/repo-docs/scripts/repo_docs_check.py` into your own
+repository and run it directly. Vendoring it removes the network call, which
+matters if your runners have no outbound access.
 
 The `fetch-depth: 0` setting is there because the staleness check reads
 commit history, and the default shallow clone has none to read.

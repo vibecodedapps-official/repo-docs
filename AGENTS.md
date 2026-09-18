@@ -28,5 +28,9 @@ The suite uses only the standard library, so a clone can run it with no installe
 ## Where to look
 
 - `README.md` for what this is, install, usage, and the checker's CLI.
+- `docs/codex.md` for the Codex hook and plugin install.
+- `CHANGELOG.md` for what each release changed. When releasing, keep the
+  name, version, and description in both `plugin.json` files, and the tag
+  in the README Actions snippet, in sync with it.
 - `skills/repo-docs/SKILL.md` for the modes and the structure contract this
   repo enforces on itself.

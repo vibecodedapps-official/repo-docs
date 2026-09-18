@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests.helpers import REPO_ROOT, SCRIPT, can_symlink, run_checker, run_checker_json
 
@@ -669,6 +670,14 @@ class TestLink(CheckerTestCase):
 # gitignore
 
 class TestGitignore(CheckerTestCase):
+    def test_gitignore_filter_skipped_when_git_times_out(self):
+        def hang(*args, **kwargs):
+            self.assertIn("timeout", kwargs)
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+        with mock.patch.object(CHECK.subprocess, "run", hang):
+            self.assertEqual(CHECK.filter_gitignored(self.tmp_path, ["a.md"]), set())
+
     def test_gitignore_filters_non_ascii_path(self):
         init_git_repo(self.tmp_path)
         write(self.tmp_path / ".gitignore", "scratch/\n")
@@ -806,6 +815,16 @@ class TestStale(CheckerTestCase):
         self.assertEqual(raw.returncode, 0)
         self.assertEqual(result["stale"], {"checked": False})
         self.assertEqual(findings_of(result, "stale"), [])
+
+    def test_stale_skipped_when_git_times_out(self):
+        """A hung git (slow or stuck filesystem) must not stall the session
+        hook: the call is bounded and the check is skipped, not crashed."""
+        def hang(*args, **kwargs):
+            self.assertIn("timeout", kwargs)
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+        with mock.patch.object(CHECK.subprocess, "run", hang):
+            self.assertEqual(CHECK.check_stale(self.tmp_path, ["AGENTS.md"], 20), (None, []))
 
 
 # ---------------------------------------------------------------------------

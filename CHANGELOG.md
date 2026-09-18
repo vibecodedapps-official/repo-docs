@@ -5,6 +5,8 @@ All notable changes to repo-docs. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-18
+
 ### Changed
 
 - Every git call in the checker is bounded by a 10 second timeout. On expiry
@@ -53,6 +55,7 @@ First tagged release.
   CommonMark-aware link parsing, and a link scan of `docs/**.md`. See
   [#6](https://github.com/vibecodedapps-official/repo-docs/pull/6).
 
-[Unreleased]: https://github.com/vibecodedapps-official/repo-docs/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/vibecodedapps-official/repo-docs/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/vibecodedapps-official/repo-docs/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/vibecodedapps-official/repo-docs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/vibecodedapps-official/repo-docs/releases/tag/v0.1.0

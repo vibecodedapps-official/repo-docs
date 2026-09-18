@@ -245,7 +245,7 @@ jobs:
           fetch-depth: 0
       - run: |
           curl -fsSL -o repo_docs_check.py \
-            https://raw.githubusercontent.com/vibecodedapps-official/repo-docs/v0.1.1/skills/repo-docs/scripts/repo_docs_check.py
+            https://raw.githubusercontent.com/vibecodedapps-official/repo-docs/v0.1.2/skills/repo-docs/scripts/repo_docs_check.py
           python3 repo_docs_check.py .
 ```
 

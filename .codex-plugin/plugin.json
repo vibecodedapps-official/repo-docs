@@ -1,0 +1,16 @@
+{
+  "name": "repo-docs",
+  "version": "0.1.0",
+  "description": "Keeps a repository's instruction files correct and progressively disclosed.",
+  "author": { "name": "vibecodedapps.net" },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "repo-docs",
+    "shortDescription": "Keep repository instructions correct",
+    "longDescription": "Audit or maintain a repository's AGENTS.md hub, its spokes, and any adapters with the repo-docs skill.",
+    "developerName": "vibecodedapps.net",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Use repo-docs to audit this repository's instructions."]
+  }
+}

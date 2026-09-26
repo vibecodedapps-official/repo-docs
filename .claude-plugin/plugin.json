@@ -1,0 +1,8 @@
+{
+  "name": "repo-docs",
+  "description": "Keeps a repository's instruction files correct and progressively disclosed.",
+  "version": "0.1.0",
+  "author": {
+    "name": "vibecodedapps.net"
+  }
+}

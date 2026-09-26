@@ -13,8 +13,9 @@ nothing on success, and fails if a manifest is missing or any `version` key diff
 To release, edit `version` in `.claude-plugin/plugin.json`, run the script, commit, tag
 `vX.Y.Z`, push the tag, and write release notes on GitHub. There is no changelog file.
 After changing `hooks/pre-commit.sh`, pipe it a sample event, such as
-`printf '{"tool_input":{"command":"git commit"}}' | sh hooks/pre-commit.sh`; a commit
-prints one line of JSON, and any other command prints nothing.
+`printf '{"tool_input":{"command":"git commit"}}' | sh hooks/pre-commit.sh`; from this
+repo a commit prints one line of JSON, any other command prints nothing, and the same
+commit run from a `mktemp -d` directory prints nothing.
 
 ## Hard constraints
 
@@ -26,8 +27,10 @@ prints one line of JSON, and any other command prints nothing.
 - One `AGENTS.md` is canonical at every scope. A `CLAUDE.md` is exactly the one line
   `@AGENTS.md`, and this repo has none.
 - One hook, `hooks/pre-commit.sh`, runs before each `Bash` tool call on Claude Code and
-  Codex. When the command runs `git commit`, it adds a reminder to run the audit; it
-  never blocks the command, reads only stdin, and never writes a file. No other hook.
+  Codex. When the command runs `git commit` and the git index of the working directory
+  holds an `AGENTS.md` or `CLAUDE.md`, it adds a reminder to run the audit; it never
+  blocks the command, reads only stdin and that index, and never writes a file. No other
+  hook.
 - One authoritative version, in `.claude-plugin/plugin.json`. The other two manifests,
   `.claude-plugin/marketplace.json` and `.codex-plugin/plugin.json`, hold copies that
   `sync-version.sh` writes and verifies equal.
